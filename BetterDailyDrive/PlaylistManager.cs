@@ -57,11 +57,14 @@ public class PlaylistManager
         if (config != null)
         {
             // Config found. Wait for 10s or 'S' press.
+            // This method is now guarded against non-interactive environments (cron).
             runInteractiveSetup = await ShouldRunSetupOrWaitAsync(10);
         }
         else
         {
             // No config found, must run interactive setup.
+            // NOTE: If running non-interactively without a config, this will proceed to Console.ReadLine() 
+            // and likely fail the setup unless input is provided via redirection.
             Console.WriteLine("No saved configuration found. Starting interactive setup.");
             runInteractiveSetup = true;
         }
@@ -116,11 +119,19 @@ public class PlaylistManager
     
     /// <summary>
     /// Waits for a specified duration, checking for user input to abort the auto-run.
-    /// FIX: Corrected delay loop to ensure the timeout is accurate (1 second per count).
+    /// FIX: Added check for Console.IsInputRedirected to prevent InvalidOperationException in cron jobs.
     /// </summary>
     /// <returns>True if setup should run, False to use the saved config.</returns>
     private async Task<bool> ShouldRunSetupOrWaitAsync(int timeoutSeconds)
     {
+        // CRON FIX: If console input is redirected (typical for cron or automated tasks), 
+        // skip the interactive wait entirely and proceed with the saved configuration.
+        if (Console.IsInputRedirected)
+        {
+            Console.WriteLine("Non-interactive environment (cron/redirected input) detected. Proceeding with saved configuration immediately.");
+            return false;
+        }
+        
         Console.WriteLine("\n--- Auto-Run Check ---");
         Console.WriteLine($"A saved configuration was found. Auto-running in {timeoutSeconds} seconds (default action).");
         Console.WriteLine("Press 'S' or 's' now to abort and start interactive Setup.");
@@ -137,6 +148,7 @@ public class PlaylistManager
             
             for (int j = 0; j < checksPerSecond; j++) 
             {
+                // Console.KeyAvailable is now safe to call here because we checked for redirection above.
                 if (Console.KeyAvailable)
                 {
                     var keyInfo = Console.ReadKey(true); // Read key without echoing
@@ -329,6 +341,8 @@ public class PlaylistManager
             Console.WriteLine($"  {i + 1}. {sourcePlaylist.Name} (Tracks: {sourcePlaylist.Tracks?.Total})");
         }
         
+        // CRON SAFETY NOTE: Console.ReadLine() will return an empty string or fail 
+        // in a non-interactive environment if no input redirection is set up.
         Console.Write("\nEnter playlist numbers, separated by commas: ");
         var input = Console.ReadLine() ?? string.Empty;
 
@@ -393,6 +407,8 @@ public class PlaylistManager
         }
         
         // Read input and parse selection
+        // CRON SAFETY NOTE: Console.ReadLine() will return an empty string or fail 
+        // in a non-interactive environment if no input redirection is set up.
         var input = Console.ReadLine() ?? string.Empty;
         var selectedIndices = input.Split(new[] { ',', ' ' }, StringSplitOptions.RemoveEmptyEntries)
                                    .Where(s => int.TryParse(s, out _))
