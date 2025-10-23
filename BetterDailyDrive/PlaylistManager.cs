@@ -272,7 +272,7 @@ public class PlaylistManager
         {
             var newPlaylist = await _spotifyClient.Playlists.Create(userId, new PlaylistCreateRequest(playlistName)
             {
-                Public = true,
+                Public = false,
                 Description = $"Curated playlist of {MaxTracksToSelect} tracks interleaved with podcasts. Created by Spotify CLI."
             });
             Console.WriteLine($"Created new playlist: {newPlaylist.Name}");
