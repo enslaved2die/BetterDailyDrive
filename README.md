@@ -103,9 +103,14 @@ docker compose up -d
 
 This starts the container, publishes port 5080, and mounts `./data` (next to the compose file) into the container as `/data` - that's where `spotify_auth_data.json`/`playlist_config.json` live, so your setup and login survive container restarts/updates. Open `http://<host>:5080` (reachable from other devices on the same network too) and use the Settings screen for scheduled rebuilds (see above) instead of cron - a container doesn't have cron running inside it.
 
-**The same headless-login caveat applies as any other headless environment**: the container has no browser, so clicking "Login with Spotify" can't automatically open one. Either:
-- Do the first login somewhere with a browser (your own machine, using the console mode or `--ui` locally) and copy the resulting `spotify_auth_data.json`/`playlist_config.json` into the `./data` folder before starting the container, or
-- Watch the container logs (`docker compose logs -f`) right after clicking Login - the authorization URL is always printed there even if opening a browser automatically fails, so you can copy-paste it into a browser on any device that can reach the container.
+**Login requires one required config step, not just the usual headless-container caveat.** Two separate things are true here:
+
+1. The container has no browser, so clicking "Login with Spotify" can't automatically open one - same as any other headless environment. Watch the container logs (`docker compose logs -f`) right after clicking Login; the authorization URL is always printed there even when auto-opening a browser fails, so you can copy-paste it into a browser on any device.
+2. **More importantly**: after you approve the login in that browser, Spotify redirects it to a fixed callback URL to finish the flow. By default that URL is `http://127.0.0.1:58739/callback`, which only resolves correctly when the browser doing the login is on the *exact same machine* as the container - never true when running this in Docker on a NAS/server, since you're completing login from your own laptop/phone. Without fixing this, the login will look like it's hanging or silently failing at the final step even after you approve it in Spotify.
+
+   Fix it by setting `CALLBACK_HOST` (already in `docker-compose.yml`, defaulted to a placeholder) to whatever IP/hostname your browser can actually reach this machine at - typically the host's LAN IP - **and** adding `http://<that same value>:58739/callback` as a Redirect URI in your app's settings at the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) (Spotify rejects anything not on that exact allow-list). `docker-compose.yml` also publishes port 58739 for this reason - that's the callback port, separate from the dashboard's port 5080.
+
+If you'd rather sidestep all of this: do the first login somewhere with a real browser and no networking complications (your own machine, console mode or `--ui` locally with the default `127.0.0.1`), then copy the resulting `spotify_auth_data.json`/`playlist_config.json` into the container's `./data` folder before starting it.
 
 ### How the image gets built
 

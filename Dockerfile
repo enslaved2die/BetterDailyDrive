@@ -27,4 +27,8 @@ FROM mcr.microsoft.com/dotnet/runtime-deps:10.0
 COPY --from=fetch /BetterDailyDrive /app/BetterDailyDrive
 WORKDIR /data
 EXPOSE 5080
+# The OAuth callback port - only reachable *from a browser* (not container-to-container), so it
+# needs publishing too whenever CALLBACK_HOST is set to something other than 127.0.0.1. See
+# AuthManager's CallbackUri comment and the README's Docker section for why/how.
+EXPOSE 58739
 ENTRYPOINT ["/app/BetterDailyDrive", "--ui"]

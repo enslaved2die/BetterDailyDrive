@@ -14,7 +14,18 @@ public class AuthManager
 {
     // --- CONFIGURATION (Auth related) ---
     private const int CallbackPort = 58739;
-    private static readonly Uri CallbackUri = new Uri($"http://127.0.0.1:{CallbackPort}/callback");
+
+    // The callback listener itself already binds to all interfaces regardless of this URI's host
+    // (EmbedIOAuthServer's WebServer(port) defaults to that) - but this exact URI is also what gets
+    // sent to Spotify as the OAuth redirect_uri, i.e. where the *browser* gets redirected back to
+    // after granting consent. "127.0.0.1" only works when that browser is on the same machine as
+    // this process. Running in Docker/on a headless box, the browser completing login is on a
+    // different device, so it needs the app's actual reachable host/IP instead - set the
+    // CALLBACK_HOST environment variable to that (and add the matching redirect URI to the app's
+    // settings in the Spotify Developer Dashboard, since Spotify requires an exact match).
+    private static readonly Uri CallbackUri =
+        new Uri($"http://{Environment.GetEnvironmentVariable("CALLBACK_HOST") ?? "127.0.0.1"}:{CallbackPort}/callback");
+
     private const string TokenFilePath = "spotify_auth_data.json";
     
     // Scopes needed for the application

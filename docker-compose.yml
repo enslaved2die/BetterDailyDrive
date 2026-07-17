@@ -6,7 +6,17 @@ services:
     image: ghcr.io/enslaved2die/betterdailydrive:latest
     container_name: better-daily-drive
     restart: unless-stopped
+    environment:
+      # REQUIRED for login to work at all: set this to whatever hostname/IP your browser can
+      # actually reach this machine at (e.g. the host's LAN IP). Spotify redirects your browser
+      # here after you approve the login, so 127.0.0.1 (the default, fine for running this outside
+      # Docker on your own machine) is wrong as soon as the browser doing the login isn't the exact
+      # machine running this container. You also need to add
+      # http://<same value>:58739/callback as a Redirect URI in your Spotify app's settings at
+      # https://developer.spotify.com/dashboard - Spotify rejects anything not on that exact list.
+      - CALLBACK_HOST=192.168.1.100
     ports:
       - "5080:5080"
+      - "58739:58739"
     volumes:
       - ./data:/data
