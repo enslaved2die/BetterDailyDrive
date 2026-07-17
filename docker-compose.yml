@@ -1,13 +1,9 @@
 services:
   better-daily-drive:
-    build:
-      context: .
-      args:
-        # "latest" always builds against whichever GitHub Release is currently marked Latest.
-        # Note this only re-checks when you actually rebuild the image (`docker compose up --build`),
-        # not automatically on container restart - pin a specific tag here instead if you'd rather
-        # control upgrades explicitly.
-        VERSION: latest
+    # Pre-built by .github/workflows/docker-publish.yml on every release - no local build/clone
+    # needed. Pin a specific version tag (e.g. v.1.0.0) here instead of :latest for controlled
+    # upgrades; either way this only updates when you actually re-pull (`docker compose pull`).
+    image: ghcr.io/enslaved2die/betterdailydrive:latest
     container_name: better-daily-drive
     restart: unless-stopped
     ports:

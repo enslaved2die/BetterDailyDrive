@@ -95,18 +95,22 @@ A few things that matter for this to actually work:
 
 ## Running with Docker
 
-A `Dockerfile` and `docker-compose.yml` are included at the repo root - this works with plain `docker compose` and should also import fine into any compose-based app store (e.g. CasaOS), since there's nothing platform-specific in either file. It always launches in `--ui` mode, since that's the only mode that makes sense with no interactive terminal attached.
-
-The image doesn't compile from source - it downloads the matching self-contained binary (`linux-x64` or `linux-arm64`, picked automatically) from a [GitHub Release](https://github.com/enslaved2die/BetterDailyDrive/releases) at build time, so building it needs no .NET SDK at all, just this Dockerfile. **That means a release with those binaries attached has to already exist before the image can build.** By default it always fetches from whichever release is currently marked "Latest" on GitHub (`VERSION: latest` in `docker-compose.yml`) - rebuilding the image (`docker compose up -d --build`) picks up whatever's newest at that moment. Set `VERSION` to a specific tag (e.g. `v2.0.0`) instead if you'd rather pin to a fixed release and upgrade deliberately.
+`docker-compose.yml` at the repo root pulls a pre-built image from GitHub Container Registry - no local build, no source checkout, no .NET SDK needed. It always launches in `--ui` mode, since that's the only mode that makes sense with no interactive terminal attached.
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
 
-This builds the image, starts the container, publishes port 5080, and mounts `./data` (next to the compose file) into the container as `/data` - that's where `spotify_auth_data.json`/`playlist_config.json` live, so your setup and login survive container restarts/updates. Open `http://<host>:5080` and use the Settings screen for scheduled rebuilds (see above) instead of cron - a container doesn't have cron running inside it.
+This starts the container, publishes port 5080, and mounts `./data` (next to the compose file) into the container as `/data` - that's where `spotify_auth_data.json`/`playlist_config.json` live, so your setup and login survive container restarts/updates. Open `http://<host>:5080` (reachable from other devices on the same network too) and use the Settings screen for scheduled rebuilds (see above) instead of cron - a container doesn't have cron running inside it.
 
 **The same headless-login caveat applies as any other headless environment**: the container has no browser, so clicking "Login with Spotify" can't automatically open one. Either:
 - Do the first login somewhere with a browser (your own machine, using the console mode or `--ui` locally) and copy the resulting `spotify_auth_data.json`/`playlist_config.json` into the `./data` folder before starting the container, or
 - Watch the container logs (`docker compose logs -f`) right after clicking Login - the authorization URL is always printed there even if opening a browser automatically fails, so you can copy-paste it into a browser on any device that can reach the container.
 
-I don't have Docker available to test-build this image myself - worth double-checking the first `docker compose up -d --build` works as expected before relying on it.
+### How the image gets built
+
+`.github/workflows/docker-publish.yml` builds `Dockerfile` (which fetches the matching self-contained binary from whichever release the workflow is building for, rather than compiling from source) and pushes it to `ghcr.io/enslaved2die/betterdailydrive` whenever a release is published, tagged both `:latest` and with that release's own tag. `docker-compose.yml` just pulls `:latest`; pin a specific tag there instead if you'd rather control upgrades deliberately - either way it only updates on `docker compose pull` (or `up -d --pull always`), not automatically on container restart.
+
+**One-time setup after adding this workflow**: it needs to actually run once (either publish a new release, or trigger it manually via the Actions tab → "Publish Docker image" → "Run workflow") before the image exists at all. The first time it pushes, the resulting GHCR package is likely **private by default** - go to the package's settings on GitHub and set visibility to Public, or `docker compose pull` will fail with a permission error on any machine that isn't authenticated to GHCR.
+
+I don't have Docker available to test any of this myself - worth verifying the workflow run succeeds and the image pulls cleanly before relying on it.
