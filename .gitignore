@@ -2,6 +2,7 @@ bin/
 obj/
 publish*
 /packages/
+release*
 riderModule.iml
 /_ReSharper.Caches/
 .idea/

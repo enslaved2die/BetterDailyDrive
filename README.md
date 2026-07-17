@@ -73,3 +73,18 @@ The `./publish` folder then contains just one binary (`BetterDailyDrive` on Linu
 ```
 
 **Headless Linux server caveat**: the first interactive login opens a browser via `xdg-open`, which needs a graphical session and will fail on a bare server. Either do the first login on a machine with a browser and copy over the resulting `spotify_auth_data.json`/`playlist_config.json` (plain JSON, no OS-specific paths, safe to move), or run `--ui` on the server and SSH-tunnel port 5080 to your own machine to reach the login button from there.
+
+## Running on a schedule
+
+Example crontab entry to rebuild the playlist four times a day (7am, noon, 4pm, 7pm):
+
+```cron
+0 7,12,16,19 * * * cd /opt/betterdailydrive && ./BetterDailyDrive-linux-x64 >> run.log 2>&1
+```
+
+A few things that matter for this to actually work:
+
+- **`cd` into the app's directory first** - `spotify_auth_data.json` and `playlist_config.json` are read/written relative to the current working directory, and cron runs with a minimal environment (no assumed working directory).
+- **Do the very first run manually, interactively**, before adding the cron job - it needs to prompt for your Client ID and walk through Spotify login/setup once. Cron can't do that (no terminal, no browser); the app detects this and fails with a clear message instead of hanging, but it still needs that one manual run to create the auth/config files cron will reuse afterward.
+- **`>> run.log 2>&1`** captures output somewhere, since cron normally discards it (or mails it, which is easy to miss). Worth checking that log occasionally, especially since the refresh token eventually expires (~6 months) and needs that manual re-login step again.
+- Swap `BetterDailyDrive-linux-x64` for whichever binary you actually deployed (e.g. the ARM64 one on a Raspberry Pi), and `chmod +x` it first if you haven't already.
