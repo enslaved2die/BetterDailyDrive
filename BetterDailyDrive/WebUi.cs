@@ -290,23 +290,6 @@ public static class WebUi
             await ctx.Response.WriteAsJsonAsync(new { isRunning, percent, status });
         });
 
-        app.MapPost("/refresh", async ctx =>
-        {
-            await ActionLock.WaitAsync();
-            try
-            {
-                var ok = await authManager.ForceRefreshAsync();
-                Console.WriteLine(ok
-                    ? "Access token refreshed manually."
-                    : "Manual refresh failed - the refresh token may have expired; try Login instead.");
-            }
-            finally
-            {
-                ActionLock.Release();
-            }
-            ctx.Response.Redirect("/");
-        });
-
         app.MapGet("/settings", async ctx =>
         {
             var manager = await EnsureAuthenticatedAsync();
@@ -379,7 +362,7 @@ public static class WebUi
         "</svg>";
 
     private static string RenderDashboard(
-        (bool HasClientId, bool HasToken, DateTime? ExpiresAt) snapshot,
+        (bool HasClientId, bool HasToken, DateTime? LoginExpiresAt) snapshot,
         PlaylistManager.PlaylistConfiguration? config,
         List<PlaylistManager.TrackSummary>? currentTracks)
     {
@@ -414,14 +397,25 @@ public static class WebUi
                   .Append(config.SourcePlaylistIds.Count).Append(" source playlist(s) &middot; ")
                   .Append(config.ShowIds.Count).Append(" podcast(s)</p>");
             }
-            if (snapshot.ExpiresAt.HasValue)
+            if (snapshot.LoginExpiresAt.HasValue)
             {
-                var remaining = snapshot.ExpiresAt.Value - DateTime.Now;
-                var isExpiringSoon = remaining <= TimeSpan.FromMinutes(10);
-                sb.Append("<p class='muted'>Access token expires in <span class='token-expiry")
+                // This is Spotify's ~6-month refresh token expiry, not the short-lived access token
+                // (which refreshes itself automatically and isn't worth showing/managing manually).
+                // This is the one that actually eventually needs a human to click Login again.
+                var remaining = snapshot.LoginExpiresAt.Value - DateTime.Now;
+                var isExpiringSoon = remaining <= TimeSpan.FromDays(14);
+                sb.Append("<p class='muted'>Login expires in <span class='token-expiry")
                   .Append(isExpiringSoon ? " expiring" : "").Append("'>")
-                  .Append(Encode(FormatRelativeTime(remaining))).Append("</span> ");
-                sb.Append("<form method='post' action='/refresh' style='display:inline'><button type='submit' class='btn-outline btn-small'>Refresh Now</button></form></p>");
+                  .Append(Encode(FormatRelativeDays(remaining))).Append("</span>");
+                if (isExpiringSoon)
+                {
+                    sb.Append(" <a href='/login'><button type='button' class='btn-outline btn-small'>Login</button></a>");
+                }
+                sb.Append("</p>");
+            }
+            else
+            {
+                sb.Append("<p class='muted'>Login expiry unknown - log in again once to start tracking it.</p>");
             }
 
             sb.Append("</div>");
@@ -660,12 +654,11 @@ public static class WebUi
 
     private static string Encode(string value) => WebUtility.HtmlEncode(value);
 
-    private static string FormatRelativeTime(TimeSpan remaining)
+    private static string FormatRelativeDays(TimeSpan remaining)
     {
-        if (remaining <= TimeSpan.Zero) return "0s (refreshing...)";
-        if (remaining.TotalMinutes < 1) return $"{(int)remaining.TotalSeconds}s";
-        if (remaining.TotalHours < 1) return $"{(int)remaining.TotalMinutes}m {remaining.Seconds}s";
-        return $"{(int)remaining.TotalHours}h {remaining.Minutes}m";
+        if (remaining <= TimeSpan.Zero) return "0 days (re-login needed)";
+        var days = (int)remaining.TotalDays;
+        return days == 0 ? "less than a day" : days == 1 ? "1 day" : $"{days} days";
     }
 
     // Spotify-inspired dark theme: near-black background, Spotify green accents, pill buttons,

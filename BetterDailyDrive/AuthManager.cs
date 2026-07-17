@@ -124,25 +124,16 @@ public class AuthManager
     /// <summary>
     /// Reads persisted auth state without prompting for anything or touching the console -
     /// safe for a UI to call just to decide what to show (e.g. before starting a login).
+    /// LoginExpiresAt is Spotify's ~6-month refresh token expiry (the thing that actually requires a
+    /// human to act eventually), not the short-lived access token - that's refreshed automatically
+    /// and isn't useful to show. Null if OriginalAuthorizationAt was never recorded (e.g. a session
+    /// authenticated before this was tracked) - it starts being tracked from the next full login.
     /// </summary>
-    public async Task<(bool HasClientId, bool HasToken, DateTime? ExpiresAt)> GetAuthSnapshotAsync()
+    public async Task<(bool HasClientId, bool HasToken, DateTime? LoginExpiresAt)> GetAuthSnapshotAsync()
     {
         var data = await LoadAuthDataAsync();
-        return (!string.IsNullOrEmpty(data.ClientId), data.HasToken, data.HasToken ? data.ExpiresAt : (DateTime?)null);
-    }
-
-    /// <summary>
-    /// Forces a token refresh right now, regardless of how much time is left on the current access
-    /// token - used by the web UI's "Refresh Now" button, as opposed to the automatic refresh in
-    /// <see cref="GetAuthenticatedClientAsync"/> which only kicks in within 5 minutes of expiry.
-    /// Returns false (without opening a browser) if there's no refresh token or the refresh fails -
-    /// the caller should point the user at Login instead in that case.
-    /// </summary>
-    public async Task<bool> ForceRefreshAsync()
-    {
-        _authData = await LoadAuthDataAsync();
-        if (string.IsNullOrEmpty(_authData.RefreshToken)) return false;
-        return await RefreshTokenAsync(_authData.RefreshToken);
+        var loginExpiresAt = data.OriginalAuthorizationAt?.AddMonths(6);
+        return (!string.IsNullOrEmpty(data.ClientId), data.HasToken, data.HasToken ? loginExpiresAt : null);
     }
 
     /// <summary>
@@ -289,7 +280,9 @@ public class AuthManager
             _authData.TokenType = initialResponse.TokenType;
             _authData.Scope = initialResponse.Scope.Split(' ');
             _authData.ExpiresAt = DateTime.Now.AddSeconds(initialResponse.ExpiresIn);
-            
+            // This is a fresh interactive login, so the refresh token's ~6-month clock starts now.
+            _authData.OriginalAuthorizationAt = DateTime.Now;
+
             await SaveAuthDataAsync(_authData);
 
             var config = SpotifyClientConfig.CreateDefault().WithToken(_authData.AccessToken);
@@ -403,7 +396,13 @@ public class AuthManager
         public string TokenType { get; set; } = string.Empty;
         public string[] Scope { get; set; } = Array.Empty<string>();
         public DateTime ExpiresAt { get; set; }
-        
+
+        // Set once, only on a full interactive login (never touched by a refresh) - Spotify measures
+        // the refresh token's ~6-month lifetime from this original authorization, not from the most
+        // recent refresh. Null for sessions authenticated before this field existed, until they log
+        // in again once.
+        public DateTime? OriginalAuthorizationAt { get; set; }
+
         public bool HasToken => !string.IsNullOrEmpty(AccessToken);
     }
 }
