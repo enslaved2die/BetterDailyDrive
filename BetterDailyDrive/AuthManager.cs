@@ -132,6 +132,20 @@ public class AuthManager
     }
 
     /// <summary>
+    /// Forces a token refresh right now, regardless of how much time is left on the current access
+    /// token - used by the web UI's "Refresh Now" button, as opposed to the automatic refresh in
+    /// <see cref="GetAuthenticatedClientAsync"/> which only kicks in within 5 minutes of expiry.
+    /// Returns false (without opening a browser) if there's no refresh token or the refresh fails -
+    /// the caller should point the user at Login instead in that case.
+    /// </summary>
+    public async Task<bool> ForceRefreshAsync()
+    {
+        _authData = await LoadAuthDataAsync();
+        if (string.IsNullOrEmpty(_authData.RefreshToken)) return false;
+        return await RefreshTokenAsync(_authData.RefreshToken);
+    }
+
+    /// <summary>
     /// Sets and persists the Client ID without touching the console (used by the web UI's setup form,
     /// where there is no console to prompt via <see cref="EnsureClientIdAsync"/>).
     /// </summary>

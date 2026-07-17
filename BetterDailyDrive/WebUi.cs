@@ -290,6 +290,23 @@ public static class WebUi
             await ctx.Response.WriteAsJsonAsync(new { isRunning, percent, status });
         });
 
+        app.MapPost("/refresh", async ctx =>
+        {
+            await ActionLock.WaitAsync();
+            try
+            {
+                var ok = await authManager.ForceRefreshAsync();
+                Console.WriteLine(ok
+                    ? "Access token refreshed manually."
+                    : "Manual refresh failed - the refresh token may have expired; try Login instead.");
+            }
+            finally
+            {
+                ActionLock.Release();
+            }
+            ctx.Response.Redirect("/");
+        });
+
         app.MapGet("/settings", async ctx =>
         {
             var manager = await EnsureAuthenticatedAsync();
@@ -397,6 +414,16 @@ public static class WebUi
                   .Append(config.SourcePlaylistIds.Count).Append(" source playlist(s) &middot; ")
                   .Append(config.ShowIds.Count).Append(" podcast(s)</p>");
             }
+            if (snapshot.ExpiresAt.HasValue)
+            {
+                var remaining = snapshot.ExpiresAt.Value - DateTime.Now;
+                var isExpiringSoon = remaining <= TimeSpan.FromMinutes(10);
+                sb.Append("<p class='muted'>Access token expires in <span class='token-expiry")
+                  .Append(isExpiringSoon ? " expiring" : "").Append("'>")
+                  .Append(Encode(FormatRelativeTime(remaining))).Append("</span> ");
+                sb.Append("<form method='post' action='/refresh' style='display:inline'><button type='submit' class='btn-outline btn-small'>Refresh Now</button></form></p>");
+            }
+
             sb.Append("</div>");
             sb.Append("<div class='actions'>");
             sb.Append("<a href='/setup'><button class='btn-outline'>Edit Setup</button></a>");
@@ -633,6 +660,14 @@ public static class WebUi
 
     private static string Encode(string value) => WebUtility.HtmlEncode(value);
 
+    private static string FormatRelativeTime(TimeSpan remaining)
+    {
+        if (remaining <= TimeSpan.Zero) return "0s (refreshing...)";
+        if (remaining.TotalMinutes < 1) return $"{(int)remaining.TotalSeconds}s";
+        if (remaining.TotalHours < 1) return $"{(int)remaining.TotalMinutes}m {remaining.Seconds}s";
+        return $"{(int)remaining.TotalHours}h {remaining.Minutes}m";
+    }
+
     // Spotify-inspired dark theme: near-black background, Spotify green accents, pill buttons,
     // and cover-art grids that double as the selection controls.
     private const string Style = """
@@ -659,6 +694,9 @@ public static class WebUi
         .btn-primary:hover { background: #1ed760; }
         .btn-outline { background: transparent; color: #fff; border: 1px solid #727272; }
         .btn-outline:hover { border-color: #fff; }
+        .btn-small { padding: 4px 14px; font-size: 0.75em; vertical-align: middle; }
+        .token-expiry { font-variant-numeric: tabular-nums; }
+        .token-expiry.expiring { color: #f15e5e; font-weight: 700; }
         .inline-form { display: flex; gap: 8px; margin: 16px 0; }
         .inline-form input {
             background: #2a2a2a; border: 1px solid #3e3e3e; color: #fff; border-radius: 4px;
