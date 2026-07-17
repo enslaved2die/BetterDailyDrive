@@ -110,15 +110,25 @@ public static class WebUi
 
             // Silently refresh-if-needed and fetch the current playlist contents, but never pop a
             // browser from a passive page load - if that would be required, just skip the track list.
+            // Also never let a passive page load 500 the whole dashboard just because the stored token
+            // happened to get rejected by Spotify at this exact moment (e.g. revoked, clock skew) -
+            // that's still recoverable via Login, so degrade to "no track list" instead of crashing.
             List<PlaylistManager.TrackSummary>? currentTracks = null;
-            var silentManager = await TryGetAuthenticatedManagerSilentlyAsync();
-            if (silentManager != null)
+            try
             {
-                var destinationId = await EnsureDestinationIdAsync(silentManager);
-                if (destinationId != null)
+                var silentManager = await TryGetAuthenticatedManagerSilentlyAsync();
+                if (silentManager != null)
                 {
-                    currentTracks = await silentManager.GetDestinationPlaylistTracksAsync(destinationId);
+                    var destinationId = await EnsureDestinationIdAsync(silentManager);
+                    if (destinationId != null)
+                    {
+                        currentTracks = await silentManager.GetDestinationPlaylistTracksAsync(destinationId);
+                    }
                 }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Could not load current playlist for dashboard: {ex.Message}");
             }
 
             await ctx.Response.WriteAsync(Html("Better Daily Drive", RenderDashboard(snapshot, config, currentTracks)));
