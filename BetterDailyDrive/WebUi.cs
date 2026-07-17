@@ -17,7 +17,12 @@ using SpotifyAPI.Web;
 
 public static class WebUi
 {
-    private const string BaseUrl = "http://localhost:5080";
+    // Binding to 0.0.0.0 (all interfaces) rather than localhost specifically matters for two reasons:
+    // it's what makes this reachable from other devices on the same network at all, and inside Docker
+    // it's required for the published port mapping to work in the first place - Docker delivers
+    // forwarded traffic to the container's network interface, not its loopback, so a listener bound
+    // to localhost inside a container is unreachable even from the host, let alone the LAN.
+    private const string ListenUrl = "http://0.0.0.0:5080";
 
     // Only one login/refresh/rebuild should run at a time - the console flow is inherently
     // single-threaded, but web requests can arrive concurrently.
@@ -156,7 +161,7 @@ public static class WebUi
         }
 
         var builder = WebApplication.CreateBuilder(args);
-        builder.WebHost.UseUrls(BaseUrl);
+        builder.WebHost.UseUrls(ListenUrl);
         builder.Logging.ClearProviders(); // keep noise out of the console log panel
         var app = builder.Build();
 
@@ -330,7 +335,8 @@ public static class WebUi
 
         _ = Task.Run(RunSchedulerLoopAsync);
 
-        Console.WriteLine($"Web UI running at {BaseUrl} - open it in your browser. Press Ctrl+C to stop.");
+        Console.WriteLine("Web UI running on port 5080 - open http://localhost:5080 on this machine, " +
+            "or http://<this machine's IP>:5080 from another device on the same network. Press Ctrl+C to stop.");
         await app.RunAsync();
     }
 
