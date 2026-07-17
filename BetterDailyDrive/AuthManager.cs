@@ -44,6 +44,11 @@ public class AuthManager
     // This object holds all persistent data (Client ID, Access Token, Refresh Token)
     private AuthData _authData = new AuthData();
 
+    // Lazily started the first time a web login is attempted, then left running for the lifetime of
+    // the process - see PrepareWebLoginRedirectAsync.
+    private EmbedIOAuthServer? _webLoginServer;
+    private string? _webLoginCodeVerifier;
+
     /// <summary>
     /// Loads stored auth data, ensures Client ID is present, refreshes token if necessary, or starts a new
     /// authentication flow (opening a browser) if needed. Returns a ready-to-use ISpotifyClient or null.
@@ -188,6 +193,92 @@ public class AuthManager
         
         // Save the config immediately so the Client ID is persisted even if the auth flow fails later.
         await SaveAuthDataAsync(_authData);
+    }
+
+    /// <summary>
+    /// Starts (or reuses) the OAuth callback listener and returns the Spotify authorize URL to send
+    /// the browser to. This is the web UI's login path, and is deliberately independent of
+    /// <see cref="StartAuthenticationFlowAsync"/>/<see cref="GetClientCoreAsync"/>'s
+    /// Console.IsInputRedirected guard and server-side BrowserUtil.Open call - both of those exist
+    /// for the CLI flow, where the process itself needs to open a browser on its own machine and has
+    /// no other way to hand the user a URL. Neither makes sense here: a human is already actively
+    /// using a real browser to click the web UI's Login button (so there's nothing to guard against -
+    /// Console.IsInputRedirected being true just means this process has no TTY, which is normal for
+    /// any backgrounded/containerized deployment and has nothing to do with whether a browser-driven
+    /// OAuth flow can work), and redirecting that same browser to Spotify directly is simpler and more
+    /// correct than trying to open a *different* browser on the server's own machine.
+    ///
+    /// Unlike StartAuthenticationFlowAsync, this returns immediately rather than blocking until the
+    /// callback arrives - the token exchange happens later, asynchronously, in the callback server's
+    /// own AuthorizationCodeReceived handler, once Spotify redirects the browser back.
+    /// </summary>
+    public async Task<Uri> PrepareWebLoginRedirectAsync()
+    {
+        _authData = await LoadAuthDataAsync();
+        if (string.IsNullOrEmpty(_authData.ClientId))
+        {
+            throw new InvalidOperationException("Client ID is not set.");
+        }
+
+        if (_webLoginServer == null)
+        {
+            var server = new EmbedIOAuthServer(CallbackUri, CallbackPort);
+            await server.Start();
+            server.AuthorizationCodeReceived += async (_, response) => await CompleteWebLoginAsync(response.Code);
+            server.ErrorReceived += (_, error, state) =>
+            {
+                Console.WriteLine($"Web login authorization failed: {error} (state: {state})");
+                return Task.CompletedTask;
+            };
+            _webLoginServer = server;
+            Console.WriteLine($"OAuth callback listener started on {CallbackUri}.");
+        }
+
+        (string codeVerifier, string codeChallenge) = PKCEUtil.GenerateCodes();
+        _webLoginCodeVerifier = codeVerifier;
+
+        var loginRequest = new LoginRequest(CallbackUri, _authData.ClientId, LoginRequest.ResponseType.Code)
+        {
+            Scope = Scopes,
+            CodeChallenge = codeChallenge,
+            CodeChallengeMethod = "S256"
+        };
+        return loginRequest.ToUri();
+    }
+
+    private async Task CompleteWebLoginAsync(string code)
+    {
+        var codeVerifier = _webLoginCodeVerifier;
+        if (codeVerifier == null)
+        {
+            Console.WriteLine("Received an OAuth callback with no pending login attempt - ignoring.");
+            return;
+        }
+
+        try
+        {
+            var response = await new OAuthClient().RequestToken(
+                new PKCETokenRequest(_authData.ClientId, code, CallbackUri, codeVerifier));
+
+            if (string.IsNullOrEmpty(response.AccessToken))
+            {
+                Console.WriteLine("Web login token exchange failed: no access token returned.");
+                return;
+            }
+
+            _authData.AccessToken = response.AccessToken;
+            _authData.RefreshToken = response.RefreshToken;
+            _authData.TokenType = response.TokenType;
+            _authData.Scope = response.Scope.Split(' ');
+            _authData.ExpiresAt = DateTime.Now.AddSeconds(response.ExpiresIn);
+            _authData.OriginalAuthorizationAt = DateTime.Now;
+            await SaveAuthDataAsync(_authData);
+            Console.WriteLine("Web login completed successfully.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Web login token exchange failed: {ex.Message}");
+        }
     }
 
     /// <summary>

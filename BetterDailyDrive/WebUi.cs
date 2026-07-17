@@ -35,28 +35,9 @@ public static class WebUi
         var authManager = new AuthManager();
         string? cachedDestinationId = null;
 
-        // Re-authenticates on every call rather than caching a client indefinitely - the web UI is a
-        // long-running process, so an access token obtained at first login will expire (Spotify access
-        // tokens last about an hour) long before the process does. GetAuthenticatedClientAsync is cheap
-        // when the token is still valid (a local check, no network call) and transparently refreshes it
-        // over the network once it's near expiry, so calling it before every action is what makes the
-        // token "auto-refresh" in practice instead of only ever working once per process lifetime.
-        async Task<PlaylistManager?> EnsureAuthenticatedAsync()
-        {
-            await ActionLock.WaitAsync();
-            try
-            {
-                var client = await authManager.GetAuthenticatedClientAsync();
-                return client != null ? new PlaylistManager(client) : null;
-            }
-            finally
-            {
-                ActionLock.Release();
-            }
-        }
-
-        // Dashboard-only variant: refreshes the token if it's silently refreshable, but never prompts
-        // or opens a browser - a page load/refresh should never trigger a surprise interactive login.
+        // Used by every route except /login: refreshes the token if it's silently refreshable, but
+        // never starts a full new login - callers should redirect to "/" (showing the Login button)
+        // if this returns null, rather than surprise the user with an interactive login attempt.
         async Task<PlaylistManager?> TryGetAuthenticatedManagerSilentlyAsync()
         {
             await ActionLock.WaitAsync();
@@ -231,15 +212,26 @@ public static class WebUi
             ctx.Response.Redirect("/");
         });
 
-        // This is the one deliberate exception that uses the full interactive-capable auth method -
-        // every other action route below uses the silent variant and just redirects to "/" (showing
-        // the Login button) if there's no valid session, rather than silently attempting a whole new
-        // OAuth flow (opening a browser, waiting up to 2 minutes for a callback) behind a click on
-        // Settings/Setup/Rebuild. Only an explicit Login click should ever trigger that.
+        // Redirects the browser making this request straight to Spotify - deliberately not using
+        // EnsureAuthenticatedAsync/StartAuthenticationFlowAsync here, since those are built for the
+        // CLI (open a browser on this same machine, block waiting for the callback) and specifically
+        // refuse to run at all when Console.IsInputRedirected is true, which is normal for any
+        // container/background service and has nothing to do with whether a browser-driven login can
+        // work. The user is already in a real browser clicking Login right now - just send it to
+        // Spotify directly and let the callback server (started here, kept running) complete the
+        // exchange asynchronously when Spotify redirects back.
         app.MapGet("/login", async ctx =>
         {
-            await EnsureAuthenticatedAsync();
-            ctx.Response.Redirect("/");
+            try
+            {
+                var redirectUri = await authManager.PrepareWebLoginRedirectAsync();
+                ctx.Response.Redirect(redirectUri.ToString());
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Could not start login: {ex.Message}");
+                ctx.Response.Redirect("/");
+            }
         });
 
         app.MapGet("/setup", async ctx =>
