@@ -231,6 +231,11 @@ public static class WebUi
             ctx.Response.Redirect("/");
         });
 
+        // This is the one deliberate exception that uses the full interactive-capable auth method -
+        // every other action route below uses the silent variant and just redirects to "/" (showing
+        // the Login button) if there's no valid session, rather than silently attempting a whole new
+        // OAuth flow (opening a browser, waiting up to 2 minutes for a callback) behind a click on
+        // Settings/Setup/Rebuild. Only an explicit Login click should ever trigger that.
         app.MapGet("/login", async ctx =>
         {
             await EnsureAuthenticatedAsync();
@@ -239,7 +244,7 @@ public static class WebUi
 
         app.MapGet("/setup", async ctx =>
         {
-            var manager = await EnsureAuthenticatedAsync();
+            var manager = await TryGetAuthenticatedManagerSilentlyAsync();
             if (manager == null) { ctx.Response.Redirect("/"); return; }
 
             var destinationId = await EnsureDestinationIdAsync(manager);
@@ -254,7 +259,7 @@ public static class WebUi
 
         app.MapPost("/setup", async ctx =>
         {
-            var manager = await EnsureAuthenticatedAsync();
+            var manager = await TryGetAuthenticatedManagerSilentlyAsync();
             if (manager == null) { ctx.Response.Redirect("/"); return; }
 
             var form = await ctx.Request.ReadFormAsync();
@@ -271,7 +276,7 @@ public static class WebUi
 
         app.MapPost("/run", async ctx =>
         {
-            var manager = await EnsureAuthenticatedAsync();
+            var manager = await TryGetAuthenticatedManagerSilentlyAsync();
             if (manager == null) { ctx.Response.Redirect("/"); return; }
 
             var config = await PlaylistManager.LoadConfigurationAsync();
@@ -292,7 +297,7 @@ public static class WebUi
 
         app.MapGet("/settings", async ctx =>
         {
-            var manager = await EnsureAuthenticatedAsync();
+            var manager = await TryGetAuthenticatedManagerSilentlyAsync();
             if (manager == null) { ctx.Response.Redirect("/"); return; }
 
             var config = await PlaylistManager.LoadConfigurationAsync() ?? new PlaylistManager.PlaylistConfiguration();
@@ -301,7 +306,7 @@ public static class WebUi
 
         app.MapPost("/settings/add", async ctx =>
         {
-            var manager = await EnsureAuthenticatedAsync();
+            var manager = await TryGetAuthenticatedManagerSilentlyAsync();
             if (manager == null) { ctx.Response.Redirect("/"); return; }
 
             var form = await ctx.Request.ReadFormAsync();
@@ -321,7 +326,7 @@ public static class WebUi
 
         app.MapPost("/settings/remove", async ctx =>
         {
-            var manager = await EnsureAuthenticatedAsync();
+            var manager = await TryGetAuthenticatedManagerSilentlyAsync();
             if (manager == null) { ctx.Response.Redirect("/"); return; }
 
             var form = await ctx.Request.ReadFormAsync();
