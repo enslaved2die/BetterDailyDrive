@@ -26,24 +26,41 @@ public class AuthManager
         SpotifyAPI.Web.Scopes.PlaylistReadPrivate,
         SpotifyAPI.Web.Scopes.UserFollowRead,
         SpotifyAPI.Web.Scopes.PlaylistModifyPublic,
-        SpotifyAPI.Web.Scopes.PlaylistModifyPrivate
+        SpotifyAPI.Web.Scopes.PlaylistModifyPrivate,
+        SpotifyAPI.Web.Scopes.UgcImageUpload
     };
 
     // This object holds all persistent data (Client ID, Access Token, Refresh Token)
     private AuthData _authData = new AuthData();
 
     /// <summary>
-    /// Loads stored auth data, ensures Client ID is present, refreshes token if necessary, or starts a new authentication flow.
-    /// Returns a ready-to-use ISpotifyClient instance or null if authentication fails.
+    /// Loads stored auth data, ensures Client ID is present, refreshes token if necessary, or starts a new
+    /// authentication flow (opening a browser) if needed. Returns a ready-to-use ISpotifyClient or null.
+    /// Safe to call repeatedly/often - if the token is still valid it's a local check with no network call;
+    /// if it's within 5 minutes of expiring, it transparently refreshes it over the network first.
     /// </summary>
-    public async Task<ISpotifyClient?> GetAuthenticatedClientAsync()
+    public Task<ISpotifyClient?> GetAuthenticatedClientAsync() => GetClientCoreAsync(allowInteractiveLogin: true);
+
+    /// <summary>
+    /// Same as <see cref="GetAuthenticatedClientAsync"/>, but never prompts on the console or opens a
+    /// browser - it returns null instead whenever a full (re-)login would otherwise be required. Use this
+    /// from passive/read-only contexts (e.g. a dashboard page load) where popping a browser unprompted
+    /// would be surprising; it still performs a silent token refresh when the token is merely near expiry.
+    /// </summary>
+    public Task<ISpotifyClient?> TryGetAuthenticatedClientSilentlyAsync() => GetClientCoreAsync(allowInteractiveLogin: false);
+
+    private async Task<ISpotifyClient?> GetClientCoreAsync(bool allowInteractiveLogin)
     {
         // 1. Load data
         _authData = await LoadAuthDataAsync();
 
-        // 2. Ensure Client ID is set (will prompt user and save if needed)
-        await EnsureClientIdAsync();
-        
+        // 2. Ensure Client ID is set (will prompt user and save if needed, when allowed)
+        if (string.IsNullOrEmpty(_authData.ClientId))
+        {
+            if (!allowInteractiveLogin) return null;
+            await EnsureClientIdAsync();
+        }
+
         if (string.IsNullOrEmpty(_authData.ClientId))
         {
             Console.WriteLine("Client ID is missing. Cannot proceed with authentication.");
@@ -52,7 +69,7 @@ public class AuthManager
 
         // 3. Check token state and attempt refresh/re-auth
         // Check if token needs refresh/re-auth (within 5 minutes of expiration)
-        if (!_authData.HasToken || _authData.ExpiresAt < DateTime.Now.AddMinutes(5)) 
+        if (!_authData.HasToken || _authData.ExpiresAt < DateTime.Now.AddMinutes(5))
         {
             // Token is null or near expiration, attempt to refresh or start new flow
             if (!string.IsNullOrEmpty(_authData.RefreshToken))
@@ -60,14 +77,32 @@ public class AuthManager
                 Console.WriteLine("Token expired or close to expiry. Attempting to refresh...");
                 if (!await RefreshTokenAsync(_authData.RefreshToken))
                 {
-                    Console.WriteLine("Refresh failed. Starting new Authorization Flow...");
-                    // Token refresh failed, must start full flow
+                    // Spotify now expires refresh tokens ~6 months after the original authorization
+                    // (previously they were effectively permanent), so this now happens periodically
+                    // in normal operation, not just on first-time corruption.
+                    Console.WriteLine("Refresh failed.");
+                    if (!allowInteractiveLogin) return null;
+                    if (Console.IsInputRedirected)
+                    {
+                        Console.WriteLine("Non-interactive environment (cron/redirected input) detected. " +
+                            "Cannot start an interactive browser login here. Run this app manually once " +
+                            "to re-authenticate, then cron runs will work again until the refresh token expires.");
+                        return null;
+                    }
+                    Console.WriteLine("Starting new Authorization Flow...");
                     return await StartAuthenticationFlowAsync();
                 }
             }
             else
             {
+                if (!allowInteractiveLogin) return null;
                 Console.WriteLine("No valid token found. Starting new Authorization Flow...");
+                if (Console.IsInputRedirected)
+                {
+                    Console.WriteLine("Non-interactive environment (cron/redirected input) detected. " +
+                        "Cannot start an interactive browser login here. Run this app manually once to authenticate.");
+                    return null;
+                }
                 return await StartAuthenticationFlowAsync();
             }
         }
@@ -84,6 +119,27 @@ public class AuthManager
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Reads persisted auth state without prompting for anything or touching the console -
+    /// safe for a UI to call just to decide what to show (e.g. before starting a login).
+    /// </summary>
+    public async Task<(bool HasClientId, bool HasToken, DateTime? ExpiresAt)> GetAuthSnapshotAsync()
+    {
+        var data = await LoadAuthDataAsync();
+        return (!string.IsNullOrEmpty(data.ClientId), data.HasToken, data.HasToken ? data.ExpiresAt : (DateTime?)null);
+    }
+
+    /// <summary>
+    /// Sets and persists the Client ID without touching the console (used by the web UI's setup form,
+    /// where there is no console to prompt via <see cref="EnsureClientIdAsync"/>).
+    /// </summary>
+    public async Task SetClientIdAsync(string clientId)
+    {
+        _authData = await LoadAuthDataAsync();
+        _authData.ClientId = clientId;
+        await SaveAuthDataAsync(_authData);
     }
 
     /// <summary>
@@ -236,11 +292,11 @@ public class AuthManager
             if (!string.IsNullOrEmpty(newResponse.AccessToken))
             {
                 Console.WriteLine("Token refreshed successfully.");
-                
+
                 // Update AuthData state
                 _authData.AccessToken = newResponse.AccessToken;
                 // Use new refresh token if provided, otherwise keep the old one
-                _authData.RefreshToken = newResponse.RefreshToken ?? refreshToken; 
+                _authData.RefreshToken = newResponse.RefreshToken ?? refreshToken;
                 _authData.TokenType = newResponse.TokenType;
                 _authData.Scope = newResponse.Scope.Split(' ');
                 _authData.ExpiresAt = DateTime.Now.AddSeconds(newResponse.ExpiresIn);
@@ -248,6 +304,14 @@ public class AuthManager
                 await SaveAuthDataAsync(_authData);
                 return true;
             }
+            return false;
+        }
+        catch (APIException ex) when (ex.Message?.Contains("invalid_grant", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            // Spotify's token endpoint returns invalid_grant once the refresh token is no longer
+            // usable (expired, revoked, or rotated out). It will keep failing on retry, so the
+            // stored token must be discarded and the user must re-authenticate from scratch.
+            Console.WriteLine("Refresh token is no longer valid (invalid_grant) - it has expired or been revoked.");
             return false;
         }
         catch (Exception ex)

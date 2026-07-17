@@ -8,3 +8,5 @@ riderModule.iml
 *.suo
 *.user
 .DS_Store
+spotify_auth_data.json
+playlist_config.json

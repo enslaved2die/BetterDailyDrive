@@ -19,9 +19,24 @@ public class PlaylistManager
     // --- Configuration Structure ---
     public class PlaylistConfiguration
     {
-        // Stores only the IDs, as FullPlaylist/FullShow are too large and complex to save
+        // Once resolved, the destination playlist is pinned by ID here and never re-guessed by name -
+        // see EnsureDestinationPlaylistAsync. Nullable/omitted on older config files and filled in on
+        // first use after upgrading.
+        public string? DestinationPlaylistId { get; set; }
+
+        // Stores only the IDs, as FullPlaylist/FullShow are too large and complex to save.
+        // ShowIds is order-significant: it's the sequence podcasts get interleaved in.
         public List<string> SourcePlaylistIds { get; set; } = new List<string>();
         public List<string> ShowIds { get; set; } = new List<string>();
+    }
+
+    // A display-friendly row for the destination playlist's current contents (used by the web UI).
+    public class TrackSummary
+    {
+        public string Title { get; set; } = string.Empty;
+        public string Subtitle { get; set; } = string.Empty;
+        public string? ImageUrl { get; set; }
+        public bool IsEpisode { get; set; }
     }
 
     public PlaylistManager(ISpotifyClient spotifyClient)
@@ -30,19 +45,18 @@ public class PlaylistManager
     }
 
     /// <summary>
-    /// Executes the main logic: determines whether to run interactive setup or use a saved configuration, 
+    /// Executes the main logic: determines whether to run interactive setup or use a saved configuration,
     /// then builds and updates the target playlist.
     /// </summary>
     public async Task AddPodcastsToDailyDriveAsync()
     {
         // 1. Get User ID (required for creating the playlist)
-        var profile = await _spotifyClient.UserProfile.Current();
-        string userId = profile.Id;
-        Console.WriteLine($"\nSuccess! Welcome, {profile.DisplayName ?? profile.Id}! (User ID: {userId})");
+        var userId = await GetCurrentUserIdAsync();
+        Console.WriteLine($"\nSuccess! (User ID: {userId})");
 
         // --- Step 1: Destination Playlist Setup ---
         Console.WriteLine($"\n--- Step 1: Destination Playlist Setup ---");
-        var destinationPlaylistId = await FindOrCreatePlaylistAsync(userId, TargetPlaylistName);
+        var destinationPlaylistId = await EnsureDestinationPlaylistAsync(userId);
 
         if (destinationPlaylistId == null)
         {
@@ -53,7 +67,7 @@ public class PlaylistManager
         // --- Step 2 & 3: Load or Create Configuration ---
         PlaylistConfiguration? config = await LoadConfigurationAsync();
         bool runInteractiveSetup = false;
-        
+
         if (config != null)
         {
             // Config found. Wait for 10s or 'S' press.
@@ -63,7 +77,7 @@ public class PlaylistManager
         else
         {
             // No config found, must run interactive setup.
-            // NOTE: If running non-interactively without a config, this will proceed to Console.ReadLine() 
+            // NOTE: If running non-interactively without a config, this will proceed to Console.ReadLine()
             // and likely fail the setup unless input is provided via redirection.
             Console.WriteLine("No saved configuration found. Starting interactive setup.");
             runInteractiveSetup = true;
@@ -72,7 +86,7 @@ public class PlaylistManager
         if (runInteractiveSetup)
         {
             // INTERACTIVE SETUP BLOCK
-            
+
             // Select Source Playlists (Music)
             Console.WriteLine($"\n--- Step 2: Select Source Playlists (Music) ---");
             var selectedPlaylists = await SelectSourcePlaylistsAsync(destinationPlaylistId);
@@ -92,7 +106,7 @@ public class PlaylistManager
                 SourcePlaylistIds = selectedPlaylists.Select(p => p.Id!).Where(id => !string.IsNullOrEmpty(id)).ToList(),
                 ShowIds = selectedShows?.Select(s => s.Id).Where(id => !string.IsNullOrEmpty(id)).ToList() ?? new List<string>()
             };
-            
+
             await SaveConfigurationAsync(config);
         }
 
@@ -103,14 +117,143 @@ public class PlaylistManager
             return;
         }
 
-        // --- Step 4: Load Full Objects from Configured IDs ---
+        await RunPipelineAsync(destinationPlaylistId, config);
+    }
+
+    /// <summary>
+    /// Gets the current user's Spotify ID.
+    /// </summary>
+    public async Task<string> GetCurrentUserIdAsync()
+    {
+        var profile = await _spotifyClient.UserProfile.Current();
+        return profile.Id;
+    }
+
+    /// <summary>
+    /// Finds or creates the app's target playlist for the given user. Once resolved, the playlist ID is
+    /// pinned in the saved configuration and reused directly on every later call - it is never re-guessed
+    /// by name again. This matters because a name-based search is fundamentally unsafe to repeat: if the
+    /// user ever ends up with two playlists sharing the exact name (e.g. one was created by an earlier,
+    /// broken run of this app before this fix existed), re-searching by name on every run risks silently
+    /// picking a different one each time, updating the wrong playlist while the "real" one never changes.
+    /// </summary>
+    public async Task<string?> EnsureDestinationPlaylistAsync(string userId)
+    {
+        var config = await LoadConfigurationAsync() ?? new PlaylistConfiguration();
+
+        if (!string.IsNullOrEmpty(config.DestinationPlaylistId))
+        {
+            try
+            {
+                var pinned = await _spotifyClient.Playlists.Get(config.DestinationPlaylistId);
+                if (pinned != null)
+                {
+                    Console.WriteLine($"Using pinned destination playlist: {pinned.Name} ({pinned.Id})");
+                    await TrySetCoverImageAsync(pinned.Id!);
+                    return pinned.Id;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Pinned destination playlist ID '{config.DestinationPlaylistId}' is no longer valid " +
+                    $"({ex.Message}). Falling back to a name search and re-pinning whatever is found/created.");
+            }
+        }
+
+        var resolvedId = await FindOrCreatePlaylistAsync(userId, TargetPlaylistName);
+        if (resolvedId != null && resolvedId != config.DestinationPlaylistId)
+        {
+            config.DestinationPlaylistId = resolvedId;
+            await SaveConfigurationAsync(config);
+        }
+        return resolvedId;
+    }
+
+    /// <summary>
+    /// Lists the current user's followed shows (podcasts), usable as interleave candidates.
+    /// </summary>
+    public Task<List<FullShow>> GetFollowedShowsAsync() => ListFollowedShowsAsync();
+
+    /// <summary>
+    /// Lists the current user's playlists that are valid sources (i.e. not the destination playlist itself).
+    /// </summary>
+    public async Task<List<FullPlaylist>> GetSourcePlaylistCandidatesAsync(string destinationId)
+    {
+        var paging = await _spotifyClient.Playlists.CurrentUsers();
+        if (paging == null) return new List<FullPlaylist>();
+
+        var allPlaylists = await _spotifyClient.PaginateAll(paging);
+        // Exclude by ID, and defensively by name too: if a stale/duplicate "Better Daily Drive"
+        // playlist exists with a different ID than the current destination (e.g. left over from
+        // before FindOrCreatePlaylistAsync's name match started working reliably), it must never
+        // be selectable as a source - that would feed the destination's own curated output back
+        // into itself, recreating the exact feedback loop this app exists to avoid.
+        return allPlaylists
+            .Where(p => p.Id != destinationId)
+            .Where(p => !string.Equals(p.Name, TargetPlaylistName, StringComparison.OrdinalIgnoreCase))
+            .Cast<FullPlaylist>()
+            .ToList();
+    }
+
+    /// <summary>
+    /// Reads the destination playlist's current contents, for display (e.g. the web UI's home screen).
+    /// </summary>
+    public async Task<List<TrackSummary>> GetDestinationPlaylistTracksAsync(string playlistId)
+    {
+        var playlist = await _spotifyClient.Playlists.Get(playlistId);
+        if (playlist?.Items?.Items == null) return new List<TrackSummary>();
+
+        var items = await _spotifyClient.PaginateAll(playlist.Items);
+        var summaries = new List<TrackSummary>();
+
+        foreach (var item in items)
+        {
+            switch (item.Track)
+            {
+                case FullTrack track:
+                    summaries.Add(new TrackSummary
+                    {
+                        Title = track.Name,
+                        Subtitle = string.Join(", ", track.Artists.Select(a => a.Name)),
+                        ImageUrl = track.Album?.Images?.FirstOrDefault()?.Url,
+                        IsEpisode = false
+                    });
+                    break;
+                case FullEpisode episode:
+                    summaries.Add(new TrackSummary
+                    {
+                        Title = episode.Name,
+                        Subtitle = "Podcast episode",
+                        ImageUrl = episode.Images?.FirstOrDefault()?.Url,
+                        IsEpisode = true
+                    });
+                    break;
+            }
+        }
+
+        return summaries;
+    }
+
+    /// <summary>
+    /// Loads the full source playlists/shows for a saved configuration, then curates,
+    /// interleaves, and pushes the result to the destination playlist.
+    /// </summary>
+    public async Task RunPipelineAsync(string destinationPlaylistId, PlaylistConfiguration config)
+    {
+        // Last-resort guard: never treat the destination playlist as one of its own sources,
+        // even if it somehow ended up saved in the configuration (e.g. an older config file, or a
+        // stale duplicate playlist that matched by ID before its name was also excluded upstream).
+        if (config.SourcePlaylistIds.Remove(destinationPlaylistId))
+        {
+            Console.WriteLine("Warning: the destination playlist was found in the saved source list and has been excluded.");
+        }
+
         var finalSourcePlaylists = await LoadSourcePlaylistsAsync(config.SourcePlaylistIds);
         var finalSelectedShows = await LoadSelectedShowsAsync(config.ShowIds);
 
         Console.WriteLine($"\nSelected {finalSourcePlaylists.Count} music source playlist(s) and {finalSelectedShows.Count} show(s).");
 
-        // --- Step 5: Curate, Interleave, and Update Playlist ---
-        Console.WriteLine($"\n--- Step 5: Curating and Copying tracks to '{TargetPlaylistName}' ---");
+        Console.WriteLine($"\n--- Curating and Copying tracks to '{TargetPlaylistName}' ---");
         await ConsolidateAndInterleaveTracksAsync(destinationPlaylistId, finalSourcePlaylists, finalSelectedShows);
 
         Console.WriteLine("\n--- Operation Complete ---");
@@ -169,7 +312,10 @@ public class PlaylistManager
 
     // --- Persistence Methods ---
 
-    private async Task SaveConfigurationAsync(PlaylistConfiguration config)
+    // Config persistence touches only the local JSON file, not the Spotify client, so it's exposed
+    // as static and callable without an authenticated PlaylistManager instance (e.g. from a web UI
+    // that wants to display the saved setup before the user has logged in).
+    public static async Task SaveConfigurationAsync(PlaylistConfiguration config)
     {
         try
         {
@@ -184,7 +330,7 @@ public class PlaylistManager
         }
     }
 
-    private async Task<PlaylistConfiguration?> LoadConfigurationAsync()
+    public static async Task<PlaylistConfiguration?> LoadConfigurationAsync()
     {
         if (!File.Exists(ConfigFileName))
         {
@@ -195,7 +341,9 @@ public class PlaylistManager
             string jsonString = await File.ReadAllTextAsync(ConfigFileName);
             var config = JsonSerializer.Deserialize<PlaylistConfiguration>(jsonString);
             
-            if (config == null || !config.SourcePlaylistIds.Any())
+            // A config with only a pinned DestinationPlaylistId and no sources yet (written by
+            // EnsureDestinationPlaylistAsync before any setup has run) is valid, not corrupt.
+            if (config == null || (!config.SourcePlaylistIds.Any() && string.IsNullOrEmpty(config.DestinationPlaylistId)))
             {
                 Console.WriteLine($"Error: Configuration file '{ConfigFileName}' found, but is empty or corrupt.");
                 File.Delete(ConfigFileName);
@@ -272,22 +420,42 @@ public class PlaylistManager
         var playlists = await _spotifyClient.PaginateAll(paging);
 
         // Added '!' to p.Name to resolve Warning CS8602 regarding possible null reference.
-        var existingPlaylist = playlists.FirstOrDefault(p => p.Name!.Equals(playlistName, StringComparison.OrdinalIgnoreCase));
+        var matches = playlists.Where(p => p.Name!.Equals(playlistName, StringComparison.OrdinalIgnoreCase)).ToList();
+
+        if (matches.Count > 1)
+        {
+            // This method only runs when there's no valid pinned ID yet (see EnsureDestinationPlaylistAsync),
+            // so picking wrong here only happens once - but pick deterministically anyway and surface the
+            // ambiguity loudly, since the real fix is for the user to remove/rename the duplicates.
+            Console.WriteLine($"WARNING: Found {matches.Count} playlists named '{playlistName}'. Picking one " +
+                "(lowest ID) and pinning it by ID from now on, but you should delete or rename the others in " +
+                "the Spotify app to avoid confusion:");
+            foreach (var m in matches.OrderBy(p => p.Id, StringComparer.Ordinal))
+            {
+                Console.WriteLine($"  - https://open.spotify.com/playlist/{m.Id} ({m.Items?.Total ?? 0} tracks)");
+            }
+        }
+
+        var existingPlaylist = matches.OrderBy(p => p.Id, StringComparer.Ordinal).FirstOrDefault();
 
         if (existingPlaylist != null)
         {
-            Console.WriteLine($"Found existing playlist: {existingPlaylist.Name}");
+            Console.WriteLine($"Found existing playlist: {existingPlaylist.Name} ({existingPlaylist.Id})");
+            await TrySetCoverImageAsync(existingPlaylist.Id!);
             return existingPlaylist.Id;
         }
 
         try
         {
-            var newPlaylist = await _spotifyClient.Playlists.Create(userId, new PlaylistCreateRequest(playlistName)
+            // POST /users/{user_id}/playlists was removed by Spotify; playlists are now always
+            // created for the current user via POST /me/playlists (userId is no longer accepted).
+            var newPlaylist = await _spotifyClient.Playlists.Create(new PlaylistCreateRequest(playlistName)
             {
                 Public = false,
                 Description = $"Curated playlist of {MaxTracksToSelect} tracks interleaved with podcasts. Created by Spotify CLI."
             });
             Console.WriteLine($"Created new playlist: {newPlaylist.Name}");
+            await TrySetCoverImageAsync(newPlaylist.Id!);
             return newPlaylist.Id;
         }
         catch (Exception ex)
@@ -298,32 +466,37 @@ public class PlaylistManager
     }
 
     /// <summary>
+    /// Sets the playlist's cover art to the app's bundled image, so it doesn't have to be set manually
+    /// in the Spotify app. Runs on every find-or-create, so it will overwrite any cover you set by hand
+    /// in the Spotify app; that's a deliberate trade-off since this app already fully owns and rebuilds
+    /// this playlist's contents every run - remove this call if you'd rather manage the cover yourself.
+    /// </summary>
+    private async Task TrySetCoverImageAsync(string playlistId)
+    {
+        var base64Jpeg = CoverImage.GetJpegBase64();
+        if (base64Jpeg == null)
+        {
+            Console.WriteLine("Skipping playlist cover image (could not prepare it).");
+            return;
+        }
+
+        try
+        {
+            await _spotifyClient.Playlists.UploadCover(playlistId, base64Jpeg);
+            Console.WriteLine("Playlist cover image set.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Could not set playlist cover image: {ex.Message}");
+        }
+    }
+
+    /// <summary>
     /// Prompts the user to select one or more existing playlists to use as track sources.
     /// </summary>
     private async Task<List<FullPlaylist>?> SelectSourcePlaylistsAsync(string destinationId)
     {
-        var paging = await _spotifyClient.Playlists.CurrentUsers();
-        if (paging == null)
-        {
-            Console.WriteLine("Error: Failed to fetch user playlists from Spotify API.");
-            return null;
-        }
-        
-        // PaginateAll returns a list of SimplePlaylist, which we cast to FullPlaylist to maintain type consistency
-        // due to SimplePlaylist being unavailable in the current context.
-        var allPlaylists = await _spotifyClient.PaginateAll(paging);
-        
-        if (!allPlaylists.Any())
-        {
-            Console.WriteLine("No playlists found to use as a source. Aborting.");
-            return null;
-        }
-        
-        // Filter out the destination playlist itself
-        var sourceCandidates = allPlaylists
-            .Where(p => p.Id != destinationId)
-            .Cast<FullPlaylist>() // Cast required to resolve compilation issues
-            .ToList();
+        var sourceCandidates = await GetSourcePlaylistCandidatesAsync(destinationId);
 
         if (!sourceCandidates.Any())
         {
@@ -336,9 +509,8 @@ public class PlaylistManager
 
         for (int i = 0; i < sourceCandidates.Count; i++)
         {
-            var sourcePlaylist = sourceCandidates[i]; 
-            // Note: FullPlaylist exposes Tracks.Total
-            Console.WriteLine($"  {i + 1}. {sourcePlaylist.Name} (Tracks: {sourcePlaylist.Tracks?.Total})");
+            var sourcePlaylist = sourceCandidates[i];
+            Console.WriteLine($"  {i + 1}. {sourcePlaylist.Name} (Tracks: {sourcePlaylist.Items?.Total})");
         }
         
         // CRON SAFETY NOTE: Console.ReadLine() will return an empty string or fail 
@@ -403,7 +575,8 @@ public class PlaylistManager
         Console.WriteLine($"\nFound {shows.Count} followed shows. Enter the numbers (1-{shows.Count}) of the shows you want to include, separated by commas (e.g., 1,3,5):");
         for (int i = 0; i < shows.Count; i++)
         {
-            Console.WriteLine($"  {i + 1}. {shows[i].Name} ({shows[i].Publisher})");
+            // Spotify removed the 'publisher' field from the Show object; name is all we can show now.
+            Console.WriteLine($"  {i + 1}. {shows[i].Name}");
         }
         
         // Read input and parse selection
@@ -442,11 +615,11 @@ public class PlaylistManager
         foreach (var source in sourcePlaylists)
         {
             // The null-forgiving operator '!' is added to source.Id to resolve Warning CS8604.
-            var fullPlaylist = await _spotifyClient.Playlists.Get(source.Id!); 
-            if (fullPlaylist?.Tracks?.Items == null) continue;
+            var fullPlaylist = await _spotifyClient.Playlists.Get(source.Id!);
+            if (fullPlaylist?.Items?.Items == null) continue;
 
             // Paginate all tracks from this source playlist
-            var allTracks = await _spotifyClient.PaginateAll(fullPlaylist.Tracks);
+            var allTracks = await _spotifyClient.PaginateAll(fullPlaylist.Items);
 
             // FIX: Correctly check for FullTrack and extract the URI.
             var urisFromSource = allTracks
@@ -529,22 +702,35 @@ public class PlaylistManager
             Console.WriteLine($"Interleaved {podcastIndex} unique podcast episodes with {shuffledTracks.Count} songs.");
         }
         
-        // 5. CLEAR AND ADD TO PLAYLIST
-        
-        // Clear the destination playlist before adding new tracks
-        Console.WriteLine($"\nClearing existing content from destination playlist...");
-        await ClearPlaylistAsync(destinationId);
-        
-        // Add consolidated track URIs in chunks (Spotify limits add to 100 items per request)
-        Console.WriteLine($"Adding {finalUris.Count} items to destination playlist...");
+        // 5. REPLACE PLAYLIST CONTENTS ATOMICALLY
+        //
+        // Previously this cleared the playlist (chunked removes) and then added tracks back
+        // (chunked adds), which produces a separate snapshot per chunk on every run. Spotify's
+        // own apps reliably push-sync a playlist for only a limited number of snapshots before
+        // falling back to a stale cached copy, and the old remove/add pattern burned through
+        // that budget every single run. Using ReplacePlaylistItems for the first batch collapses
+        // the "clear + first 100" step into one atomic snapshot instead of two-plus.
+        Console.WriteLine($"Replacing destination playlist contents with {finalUris.Count} items...");
+        var chunks = finalUris.Chunk(100).ToList();
         int addedCount = 0;
 
-        // Ensure we use the built-in Chunk method for iteration, which requires System.Linq.
-        foreach (var chunk in finalUris.Chunk(100))
+        if (chunks.Count == 0)
         {
-            var request = new PlaylistAddItemsRequest(chunk.ToList());
-            await _spotifyClient.Playlists.AddItems(destinationId, request);
-            addedCount += chunk.Length;
+            var emptyRequest = new PlaylistReplaceItemsRequest(new List<string>());
+            await _spotifyClient.Playlists.ReplacePlaylistItems(destinationId, emptyRequest);
+        }
+        else
+        {
+            var replaceRequest = new PlaylistReplaceItemsRequest(chunks[0].ToList());
+            await _spotifyClient.Playlists.ReplacePlaylistItems(destinationId, replaceRequest);
+            addedCount += chunks[0].Length;
+
+            foreach (var chunk in chunks.Skip(1))
+            {
+                var addRequest = new PlaylistAddItemsRequest(chunk.ToList());
+                await _spotifyClient.Playlists.AddPlaylistItems(destinationId, addRequest);
+                addedCount += chunk.Length;
+            }
         }
 
         Console.WriteLine($"Successfully updated playlist with {addedCount} items.");
@@ -581,45 +767,4 @@ public class PlaylistManager
         return episodeUris;
     }
 
-    /// <summary>
-    /// Clears all tracks from a playlist.
-    /// </summary>
-    private async Task ClearPlaylistAsync(string playlistId)
-    {
-        var fullPlaylist = await _spotifyClient.Playlists.Get(playlistId);
-        
-        if (fullPlaylist?.Tracks?.Items == null) return;
-        
-        // Paginate all current tracks to find their URIs
-        var allCurrentTracks = await _spotifyClient.PaginateAll(fullPlaylist.Tracks);
-        
-        // Safely access the URI regardless of whether the item is a FullTrack or FullEpisode.
-        var tracksToDelete = allCurrentTracks
-            .Select(t => t.Track)
-            .Where(track => track != null)
-            .Select(track =>
-            {
-                // Use pattern matching to safely get the Uri from either FullTrack or FullEpisode
-                if (track is FullTrack fullTrack) return fullTrack.Uri;
-                if (track is FullEpisode fullEpisode) return fullEpisode.Uri;
-                return null;
-            })
-            .Where(uri => !string.IsNullOrEmpty(uri))
-            .Select(uri => new PlaylistRemoveItemsRequest.Item { Uri = uri! })
-            .ToList();
-
-        if (!tracksToDelete.Any())
-        {
-            Console.WriteLine("Destination playlist was already empty.");
-            return;
-        }
-
-        // Delete items in chunks (Spotify limits remove to 100 items per request)
-        foreach (var chunk in tracksToDelete.Chunk(100))
-        {
-            var request = new PlaylistRemoveItemsRequest { Tracks = chunk.ToList() };
-            await _spotifyClient.Playlists.RemoveItems(playlistId, request);
-        }
-        Console.WriteLine($"Removed {tracksToDelete.Count} old items.");
-    }
 }

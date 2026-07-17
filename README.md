@@ -9,3 +9,19 @@ This small CLI fixes this with a custom way to create you own Daily Drive.
 This script could be run via a cron job for example with regular update intervals picking the newest version of a podcast.
 
 #### Also if youre in a market where Daily Drive doesnt exist, e.g. Colombia this is the perfect solution to now kinda have it.
+
+## Usage
+
+Console mode (original interactive/cron flow):
+
+```
+dotnet run --project BetterDailyDrive
+```
+
+Web UI mode — does the same setup (Client ID entry, Spotify login, source playlist/podcast selection) and triggering through a local browser page instead of console prompts:
+
+```
+dotnet run --project BetterDailyDrive -- --ui
+```
+
+Then open http://localhost:5080 in your browser. Both modes share the same saved `spotify_auth_data.json` / `playlist_config.json`, so you can set up in one and trigger from the other. Stop the web UI with Ctrl+C in its terminal.

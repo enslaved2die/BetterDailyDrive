@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Linq;
 using System.Threading.Tasks;
 using SpotifyAPI.Web; // Only needed for ISpotifyClient type
 
@@ -12,6 +13,14 @@ public class SpotifyCli
     /// </summary>
     public static async Task Main(string[] args)
     {
+        bool wantsWebUi = args.Any(a => a.Equals("--ui", StringComparison.OrdinalIgnoreCase)
+                                      || a.Equals("-ui", StringComparison.OrdinalIgnoreCase));
+        if (wantsWebUi)
+        {
+            await WebUi.RunAsync(args);
+            return;
+        }
+
         var cli = new SpotifyCli();
         await cli.RunAsync();
     }
