@@ -66,8 +66,10 @@ Pick `<RID>` for your target:
 | Linux ARM64 (e.g. Raspberry Pi, Graviton) | `linux-arm64` |
 | Linux, musl-based (e.g. Alpine) | `linux-musl-x64` |
 | Windows x64 | `win-x64` |
+| macOS Intel | `osx-x64` |
+| macOS Apple Silicon | `osx-arm64` |
 
-The `./publish` folder then contains just one binary (`BetterDailyDrive` on Linux, `BetterDailyDrive.exe` on Windows, ~100+ MB since the runtime is bundled in) plus an optional `.pdb` (debug symbols only, safe to leave behind). Copy that one file to the target machine, `chmod +x` it on Linux, and run it directly - no `dotnet` command needed there:
+The `./publish` folder then contains just one binary (`BetterDailyDrive` on Linux/macOS, `BetterDailyDrive.exe` on Windows, ~100+ MB since the runtime is bundled in) plus an optional `.pdb` (debug symbols only, safe to leave behind). Copy that one file to the target machine, `chmod +x` it on Linux/macOS, and run it directly - no `dotnet` command needed there:
 
 ```
 ./BetterDailyDrive          # or BetterDailyDrive.exe on Windows
@@ -75,6 +77,13 @@ The `./publish` folder then contains just one binary (`BetterDailyDrive` on Linu
 ```
 
 **Headless Linux server caveat**: the first interactive login opens a browser via `xdg-open`, which needs a graphical session and will fail on a bare server. Either do the first login on a machine with a browser and copy over the resulting `spotify_auth_data.json`/`playlist_config.json` (plain JSON, no OS-specific paths, safe to move), or run `--ui` on the server and SSH-tunnel port 5080 to your own machine to reach the login button from there.
+
+**macOS is published as two separate binaries** (`osx-x64`, `osx-arm64`), not a single universal one - that requires Apple's `lipo` tool, which only runs on macOS itself, so it can't be produced from a non-Mac build machine. If you want one combined file, download both and merge them yourself on a Mac:
+
+```bash
+lipo -create -output BetterDailyDrive-macos-universal BetterDailyDrive-macos-x64 BetterDailyDrive-macos-arm64
+chmod +x BetterDailyDrive-macos-universal
+```
 
 ## Running on a schedule
 
