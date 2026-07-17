@@ -209,8 +209,18 @@ public class AuthManager
 
         var uri = loginRequest.ToUri();
         Console.WriteLine($"\nOpening browser for authorization. Please login:\n{uri}");
-        
-        BrowserUtil.Open(uri);
+
+        try
+        {
+            BrowserUtil.Open(uri);
+        }
+        catch (Exception ex)
+        {
+            // No browser to open in a headless/containerized environment (e.g. inside Docker, where
+            // xdg-open doesn't exist) - the URL above was already printed, so open it manually instead
+            // of letting this crash the whole login attempt.
+            Console.WriteLine($"Could not automatically open a browser ({ex.Message}). Open the URL above manually.");
+        }
 
         var codeTcs = new TaskCompletionSource<string>();
         

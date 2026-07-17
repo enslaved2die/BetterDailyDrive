@@ -28,6 +28,11 @@ public class PlaylistManager
         // ShowIds is order-significant: it's the sequence podcasts get interleaved in.
         public List<string> SourcePlaylistIds { get; set; } = new List<string>();
         public List<string> ShowIds { get; set; } = new List<string>();
+
+        // Times of day (24h "HH:mm", server's local time zone) the web UI automatically rebuilds the
+        // playlist at. Only checked while the --ui process is actually running - see WebUi's scheduler
+        // loop. Empty by default (manual "Rebuild Now" only), and irrelevant to the console/cron flow.
+        public List<string> ScheduledTimes { get; set; } = new List<string>();
     }
 
     // A display-friendly row for the destination playlist's current contents (used by the web UI).
@@ -341,9 +346,12 @@ public class PlaylistManager
             string jsonString = await File.ReadAllTextAsync(ConfigFileName);
             var config = JsonSerializer.Deserialize<PlaylistConfiguration>(jsonString);
             
-            // A config with only a pinned DestinationPlaylistId and no sources yet (written by
-            // EnsureDestinationPlaylistAsync before any setup has run) is valid, not corrupt.
-            if (config == null || (!config.SourcePlaylistIds.Any() && string.IsNullOrEmpty(config.DestinationPlaylistId)))
+            // A config can legitimately have no source playlists yet and still be valid - e.g. only a
+            // pinned DestinationPlaylistId (written before any setup has run), or only ScheduledTimes
+            // (set up in Settings before Setup). Only truly empty/unparseable content is corrupt.
+            if (config == null || (!config.SourcePlaylistIds.Any()
+                && string.IsNullOrEmpty(config.DestinationPlaylistId)
+                && !config.ScheduledTimes.Any()))
             {
                 Console.WriteLine($"Error: Configuration file '{ConfigFileName}' found, but is empty or corrupt.");
                 File.Delete(ConfigFileName);

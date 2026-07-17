@@ -26,6 +26,8 @@ dotnet run --project BetterDailyDrive -- --ui
 
 Then open http://localhost:5080 in your browser. Both modes share the same saved `spotify_auth_data.json` / `playlist_config.json`, so you can set up in one and trigger from the other. Stop the web UI with Ctrl+C in its terminal.
 
+The web UI also has a **Settings** screen for automatic rebuilds - add times of day (24h, server's local time zone) and it rebuilds the playlist on its own at each one, with no cron job needed, as long as the process keeps running. This only applies to `--ui` mode; the console flow doesn't have a built-in scheduler and is meant to be driven by an external cron job instead (see below).
+
 ### Screenshots
 
 Dashboard - current playlist, config summary, and the rebuild trigger:
@@ -76,7 +78,9 @@ The `./publish` folder then contains just one binary (`BetterDailyDrive` on Linu
 
 ## Running on a schedule
 
-Example crontab entry to rebuild the playlist four times a day (7am, noon, 4pm, 7pm):
+**Web UI mode**: use the Settings screen (see Usage above) - add times of day there and it rebuilds itself automatically, no cron needed. It only checks while the process is actually running, so pair it with `restart: unless-stopped` (Docker) or a process manager/systemd unit if you want it to survive reboots.
+
+**Console mode**: use an external cron job. Example crontab entry to rebuild the playlist four times a day (7am, noon, 4pm, 7pm):
 
 ```cron
 0 7,12,16,19 * * * cd /opt/betterdailydrive && ./BetterDailyDrive-linux-x64 >> run.log 2>&1
@@ -88,3 +92,21 @@ A few things that matter for this to actually work:
 - **Do the very first run manually, interactively**, before adding the cron job - it needs to prompt for your Client ID and walk through Spotify login/setup once. Cron can't do that (no terminal, no browser); the app detects this and fails with a clear message instead of hanging, but it still needs that one manual run to create the auth/config files cron will reuse afterward.
 - **`>> run.log 2>&1`** captures output somewhere, since cron normally discards it (or mails it, which is easy to miss). Worth checking that log occasionally, especially since the refresh token eventually expires (~6 months) and needs that manual re-login step again.
 - Swap `BetterDailyDrive-linux-x64` for whichever binary you actually deployed (e.g. the ARM64 one on a Raspberry Pi), and `chmod +x` it first if you haven't already.
+
+## Running with Docker
+
+A `Dockerfile` and `docker-compose.yml` are included at the repo root - this works with plain `docker compose` and should also import fine into any compose-based app store (e.g. CasaOS), since there's nothing platform-specific in either file. It always launches in `--ui` mode, since that's the only mode that makes sense with no interactive terminal attached.
+
+The image doesn't compile from source - it downloads the matching self-contained binary (`linux-x64` or `linux-arm64`, picked automatically) from a [GitHub Release](https://github.com/enslaved2die/BetterDailyDrive/releases) at build time, so building it needs no .NET SDK at all, just this Dockerfile. **That means a release with those binaries attached has to already exist before the image can build.** By default it always fetches from whichever release is currently marked "Latest" on GitHub (`VERSION: latest` in `docker-compose.yml`) - rebuilding the image (`docker compose up -d --build`) picks up whatever's newest at that moment. Set `VERSION` to a specific tag (e.g. `v2.0.0`) instead if you'd rather pin to a fixed release and upgrade deliberately.
+
+```bash
+docker compose up -d --build
+```
+
+This builds the image, starts the container, publishes port 5080, and mounts `./data` (next to the compose file) into the container as `/data` - that's where `spotify_auth_data.json`/`playlist_config.json` live, so your setup and login survive container restarts/updates. Open `http://<host>:5080` and use the Settings screen for scheduled rebuilds (see above) instead of cron - a container doesn't have cron running inside it.
+
+**The same headless-login caveat applies as any other headless environment**: the container has no browser, so clicking "Login with Spotify" can't automatically open one. Either:
+- Do the first login somewhere with a browser (your own machine, using the console mode or `--ui` locally) and copy the resulting `spotify_auth_data.json`/`playlist_config.json` into the `./data` folder before starting the container, or
+- Watch the container logs (`docker compose logs -f`) right after clicking Login - the authorization URL is always printed there even if opening a browser automatically fails, so you can copy-paste it into a browser on any device that can reach the container.
+
+I don't have Docker available to test-build this image myself - worth double-checking the first `docker compose up -d --build` works as expected before relying on it.

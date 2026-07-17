@@ -1,0 +1,16 @@
+services:
+  better-daily-drive:
+    build:
+      context: .
+      args:
+        # "latest" always builds against whichever GitHub Release is currently marked Latest.
+        # Note this only re-checks when you actually rebuild the image (`docker compose up --build`),
+        # not automatically on container restart - pin a specific tag here instead if you'd rather
+        # control upgrades explicitly.
+        VERSION: latest
+    container_name: better-daily-drive
+    restart: unless-stopped
+    ports:
+      - "5080:5080"
+    volumes:
+      - ./data:/data

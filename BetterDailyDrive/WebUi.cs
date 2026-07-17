@@ -74,6 +74,87 @@ public static class WebUi
             return cachedDestinationId;
         }
 
+        // Shared by the "Rebuild Now" button and the scheduler below, so they can't run concurrently
+        // and both drive the same progress bar. Returns false without doing anything if a rebuild is
+        // already in flight.
+        bool TryStartRebuild(PlaylistManager manager, PlaylistManager.PlaylistConfiguration config)
+        {
+            if (ProgressState.Snapshot().IsRunning) return false;
+
+            // Set synchronously before the background task starts, so the very next page load (the
+            // POST handler's redirect target) already reflects "running" instead of racing with it.
+            ProgressState.Start();
+            _ = Task.Run(async () =>
+            {
+                await ActionLock.WaitAsync();
+                try
+                {
+                    var destinationId = await EnsureDestinationIdAsync(manager);
+                    if (destinationId != null)
+                    {
+                        await manager.RunPipelineAsync(destinationId, config);
+                    }
+                    ProgressState.Finish("Done!");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Rebuild failed: {ex}");
+                    ProgressState.Finish($"Failed: {ex.Message}", success: false);
+                }
+                finally
+                {
+                    ActionLock.Release();
+                }
+            });
+            return true;
+        }
+
+        // Checks once a minute whether the current local time matches one of the configured
+        // ScheduledTimes, and if so triggers the same rebuild the "Rebuild Now" button does. Uses the
+        // silent (never-interactive) auth path deliberately - an unattended scheduled trigger should
+        // never pop a browser out of nowhere; if there's no valid session, it just skips that run and
+        // logs why, same as it would for any other silent-auth failure.
+        async Task RunSchedulerLoopAsync()
+        {
+            var lastFiredDate = new Dictionary<string, DateOnly>();
+            while (true)
+            {
+                try
+                {
+                    var config = await PlaylistManager.LoadConfigurationAsync();
+                    if (config != null && config.ScheduledTimes.Count > 0)
+                    {
+                        var now = DateTime.Now;
+                        var nowHm = now.ToString("HH:mm");
+                        var today = DateOnly.FromDateTime(now);
+
+                        foreach (var time in config.ScheduledTimes)
+                        {
+                            if (time != nowHm) continue;
+                            if (lastFiredDate.TryGetValue(time, out var last) && last == today) continue;
+
+                            lastFiredDate[time] = today;
+                            var manager = await TryGetAuthenticatedManagerSilentlyAsync();
+                            if (manager == null)
+                            {
+                                Console.WriteLine($"Scheduled rebuild for {time} skipped - not logged in.");
+                                continue;
+                            }
+
+                            Console.WriteLine($"Scheduled rebuild triggered for {time}.");
+                            TryStartRebuild(manager, config);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Scheduler check failed: {ex.Message}");
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(30));
+            }
+        }
+
         var builder = WebApplication.CreateBuilder(args);
         builder.WebHost.UseUrls(BaseUrl);
         builder.Logging.ClearProviders(); // keep noise out of the console log panel
@@ -191,36 +272,10 @@ public static class WebUi
             var config = await PlaylistManager.LoadConfigurationAsync();
             if (config == null) { ctx.Response.Redirect("/setup"); return; }
 
-            if (!ProgressState.Snapshot().IsRunning)
-            {
-                // Runs in the background rather than being awaited here: the whole point of the
-                // progress bar is to show live status while the rebuild is in flight, which requires
-                // this request to return immediately instead of blocking until the pipeline finishes.
-                ProgressState.Start();
-                _ = Task.Run(async () =>
-                {
-                    await ActionLock.WaitAsync();
-                    try
-                    {
-                        var destinationId = await EnsureDestinationIdAsync(manager);
-                        if (destinationId != null)
-                        {
-                            await manager.RunPipelineAsync(destinationId, config);
-                        }
-                        ProgressState.Finish("Done!");
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"Rebuild failed: {ex}");
-                        ProgressState.Finish($"Failed: {ex.Message}", success: false);
-                    }
-                    finally
-                    {
-                        ActionLock.Release();
-                    }
-                });
-            }
-
+            // Runs in the background rather than being awaited here: the whole point of the progress
+            // bar is to show live status while the rebuild is in flight, which requires this request
+            // to return immediately instead of blocking until the pipeline finishes.
+            TryStartRebuild(manager, config);
             ctx.Response.Redirect("/");
         });
 
@@ -229,6 +284,51 @@ public static class WebUi
             var (isRunning, percent, status) = ProgressState.Snapshot();
             await ctx.Response.WriteAsJsonAsync(new { isRunning, percent, status });
         });
+
+        app.MapGet("/settings", async ctx =>
+        {
+            var manager = await EnsureAuthenticatedAsync();
+            if (manager == null) { ctx.Response.Redirect("/"); return; }
+
+            var config = await PlaylistManager.LoadConfigurationAsync() ?? new PlaylistManager.PlaylistConfiguration();
+            await ctx.Response.WriteAsync(Html("Settings", RenderSettingsForm(config)));
+        });
+
+        app.MapPost("/settings/add", async ctx =>
+        {
+            var manager = await EnsureAuthenticatedAsync();
+            if (manager == null) { ctx.Response.Redirect("/"); return; }
+
+            var form = await ctx.Request.ReadFormAsync();
+            var time = form["time"].ToString().Trim();
+            var config = await PlaylistManager.LoadConfigurationAsync() ?? new PlaylistManager.PlaylistConfiguration();
+
+            if (System.Text.RegularExpressions.Regex.IsMatch(time, @"^([01]\d|2[0-3]):[0-5]\d$")
+                && !config.ScheduledTimes.Contains(time))
+            {
+                config.ScheduledTimes.Add(time);
+                config.ScheduledTimes.Sort(StringComparer.Ordinal); // "HH:mm" sorts correctly as plain text
+                await PlaylistManager.SaveConfigurationAsync(config);
+            }
+
+            ctx.Response.Redirect("/settings");
+        });
+
+        app.MapPost("/settings/remove", async ctx =>
+        {
+            var manager = await EnsureAuthenticatedAsync();
+            if (manager == null) { ctx.Response.Redirect("/"); return; }
+
+            var form = await ctx.Request.ReadFormAsync();
+            var time = form["time"].ToString().Trim();
+            var config = await PlaylistManager.LoadConfigurationAsync() ?? new PlaylistManager.PlaylistConfiguration();
+            config.ScheduledTimes.Remove(time);
+            await PlaylistManager.SaveConfigurationAsync(config);
+
+            ctx.Response.Redirect("/settings");
+        });
+
+        _ = Task.Run(RunSchedulerLoopAsync);
 
         Console.WriteLine($"Web UI running at {BaseUrl} - open it in your browser. Press Ctrl+C to stop.");
         await app.RunAsync();
@@ -294,6 +394,7 @@ public static class WebUi
             sb.Append("</div>");
             sb.Append("<div class='actions'>");
             sb.Append("<a href='/setup'><button class='btn-outline'>Edit Setup</button></a>");
+            sb.Append("<a href='/settings'><button class='btn-outline'>Settings</button></a>");
             sb.Append("<form method='post' action='/run' id='runForm'><button class='btn-primary' id='runButton'>Rebuild Now</button></form>");
             sb.Append("</div></div>");
 
@@ -374,6 +475,47 @@ public static class WebUi
             if (polling) poll();
         })();
         """;
+
+    private static string RenderSettingsForm(PlaylistManager.PlaylistConfiguration config)
+    {
+        var sb = new StringBuilder();
+        sb.Append("<div class='content'>");
+        sb.Append("<h1>Settings</h1>");
+
+        sb.Append("<h2>Automatic rebuild times</h2>");
+        sb.Append("<p class='muted'>The playlist rebuilds automatically at these times every day, in this server's local time zone. ")
+          .Append("Only happens while this app is actually running - if it's off at the scheduled time, that run is simply skipped.</p>");
+
+        var times = config.ScheduledTimes.OrderBy(t => t, StringComparer.Ordinal).ToList();
+        if (!times.Any())
+        {
+            sb.Append("<p class='muted'>No scheduled times yet - the playlist only rebuilds when you press Rebuild Now.</p>");
+        }
+        else
+        {
+            sb.Append("<div class='schedule-list'>");
+            foreach (var time in times)
+            {
+                sb.Append("<div class='schedule-row'>");
+                sb.Append("<span class='schedule-time'>").Append(Encode(time)).Append("</span>");
+                sb.Append("<form method='post' action='/settings/remove'>");
+                sb.Append("<input type='hidden' name='time' value='").Append(Encode(time)).Append("'>");
+                sb.Append("<button type='submit' class='btn-outline'>Remove</button>");
+                sb.Append("</form>");
+                sb.Append("</div>");
+            }
+            sb.Append("</div>");
+        }
+
+        sb.Append("<form method='post' action='/settings/add' class='inline-form'>");
+        sb.Append("<input type='time' name='time' required>");
+        sb.Append("<button class='btn-primary' type='submit'>Add time</button>");
+        sb.Append("</form>");
+
+        sb.Append("<p style='margin-top:24px'><a href='/'><button type='button' class='btn-outline'>Back</button></a></p>");
+        sb.Append("</div>");
+        return sb.ToString();
+    }
 
     private static string RenderSetupForm(List<FullPlaylist> candidates, List<FullShow> shows, PlaylistManager.PlaylistConfiguration? existingConfig)
     {
@@ -561,6 +703,14 @@ public static class WebUi
             background: #1DB954; height: 100%; border-radius: 500px; transition: width 0.4s ease;
         }
         #progressStatus { margin-top: 8px; }
+
+        .schedule-list { margin: 16px 0; display: flex; flex-direction: column; gap: 8px; max-width: 320px; }
+        .schedule-row {
+            display: flex; align-items: center; justify-content: space-between; gap: 12px;
+            background: #181818; border-radius: 6px; padding: 10px 16px;
+        }
+        .schedule-row form { margin: 0; }
+        .schedule-time { font-size: 1.1em; font-weight: 600; font-variant-numeric: tabular-nums; }
         """;
 
     private static string Html(string title, string body) =>
