@@ -1,4 +1,4 @@
-![cover](better_daily_drive_spotify.png)
+![cover](docs/better_daily_drive_spotify.png)
 ## Better Daily Drive
 
 Spotifys Daily Drive is a nice but flawed feature. 
@@ -25,3 +25,51 @@ dotnet run --project BetterDailyDrive -- --ui
 ```
 
 Then open http://localhost:5080 in your browser. Both modes share the same saved `spotify_auth_data.json` / `playlist_config.json`, so you can set up in one and trigger from the other. Stop the web UI with Ctrl+C in its terminal.
+
+### Screenshots
+
+Dashboard - current playlist, config summary, and the rebuild trigger:
+
+![Dashboard](docs/screenshots/dashboard.png)
+
+Setup - pick source playlists by clicking their cover art:
+
+![Setup - source playlists](docs/screenshots/setup-playlists.png)
+
+Setup - pick podcasts and their interleave order, shown as numbered badges:
+
+![Setup - podcasts](docs/screenshots/setup-podcasts.png)
+
+## Building
+
+**Just to check it compiles / run it locally:**
+
+```
+dotnet build BetterDailyDrive
+```
+
+This requires the .NET 10 SDK on the machine you're building on, and the .NET 10 ASP.NET Core Runtime on whatever machine actually runs it (the `--ui` mode needs it).
+
+**For deployment (e.g. to a cron server), publish a self-contained single-file binary instead** - it bundles the whole .NET runtime into one file, so the target machine needs nothing installed at all:
+
+```
+dotnet publish BetterDailyDrive -c Release -r <RID> --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ./publish
+```
+
+Pick `<RID>` for your target:
+
+| Target | RID |
+|---|---|
+| Linux x64 (typical server) | `linux-x64` |
+| Linux ARM64 (e.g. Raspberry Pi, Graviton) | `linux-arm64` |
+| Linux, musl-based (e.g. Alpine) | `linux-musl-x64` |
+| Windows x64 | `win-x64` |
+
+The `./publish` folder then contains just one binary (`BetterDailyDrive` on Linux, `BetterDailyDrive.exe` on Windows, ~100+ MB since the runtime is bundled in) plus an optional `.pdb` (debug symbols only, safe to leave behind). Copy that one file to the target machine, `chmod +x` it on Linux, and run it directly - no `dotnet` command needed there:
+
+```
+./BetterDailyDrive          # or BetterDailyDrive.exe on Windows
+./BetterDailyDrive --ui
+```
+
+**Headless Linux server caveat**: the first interactive login opens a browser via `xdg-open`, which needs a graphical session and will fail on a bare server. Either do the first login on a machine with a browser and copy over the resulting `spotify_auth_data.json`/`playlist_config.json` (plain JSON, no OS-specific paths, safe to move), or run `--ui` on the server and SSH-tunnel port 5080 to your own machine to reach the login button from there.
