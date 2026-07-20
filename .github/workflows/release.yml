@@ -1,0 +1,111 @@
+name: Release
+
+# On every published release: builds all six self-contained binaries and attaches them to that
+# release, then builds/pushes the Docker image (which fetches those same binaries from the release -
+# see Dockerfile). The Docker job runs after the binaries job so it can never race against assets
+# that aren't uploaded yet.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag to build the Docker image against (e.g. v.1.0.0), or "latest"'
+        default: latest
+        required: false
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-binaries:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - rid: linux-x64
+            asset: BetterDailyDrive-linux-x64
+          - rid: linux-arm64
+            asset: BetterDailyDrive-linux-arm64
+          - rid: linux-musl-x64
+            asset: BetterDailyDrive-linux-musl-x64
+          - rid: win-x64
+            asset: BetterDailyDrive-win-x64.exe
+          - rid: osx-x64
+            asset: BetterDailyDrive-macos-x64
+          - rid: osx-arm64
+            asset: BetterDailyDrive-macos-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish ${{ matrix.rid }}
+        run: |
+          dotnet publish BetterDailyDrive -c Release -r ${{ matrix.rid }} --self-contained true \
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ./out
+
+      - name: Rename output to release asset name
+        run: |
+          SRC=./out/BetterDailyDrive
+          if [ "${{ matrix.rid }}" = "win-x64" ]; then SRC=./out/BetterDailyDrive.exe; fi
+          cp "$SRC" "./${{ matrix.asset }}"
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./${{ matrix.asset }}
+
+      # Manual/workflow_dispatch runs have no release to attach to - upload as a plain build
+      # artifact instead, useful for testing this workflow without publishing a release.
+      - name: Upload as workflow artifact
+        if: github.event_name != 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ./${{ matrix.asset }}
+
+  docker:
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine version to build against
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "value=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ steps.version.outputs.value }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.value }}

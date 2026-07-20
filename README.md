@@ -44,6 +44,8 @@ Setup - pick podcasts and their interleave order, shown as numbered badges:
 
 ## Building
 
+Release binaries for all platforms below are built and attached to each [release](https://github.com/enslaved2die/BetterDailyDrive/releases) automatically by `.github/workflows/release.yml`, along with the Docker image (see "Running with Docker"). Manual builds are only needed for local development/testing.
+
 **Just to check it compiles / run it locally:**
 
 ```
@@ -112,7 +114,7 @@ docker compose up -d
 
 This starts the container, publishes port 5080, and mounts `./data` (next to the compose file) into the container as `/data` - that's where `spotify_auth_data.json`/`playlist_config.json` live, so your setup and login survive container restarts/updates. Open `http://<host>:5080` (reachable from other devices on the same network too) and use the Settings screen for scheduled rebuilds (see above) instead of cron - a container doesn't have cron running inside it.
 
-**Login requires one required config step, not just the usual headless-container caveat.** Two separate things are true here:
+**Login needs one extra config step here, not just the usual headless-container caveat.** Two separate things are true:
 
 1. The container has no browser, so clicking "Login with Spotify" can't automatically open one - same as any other headless environment. Watch the container logs (`docker compose logs -f`) right after clicking Login; the authorization URL is always printed there even when auto-opening a browser fails, so you can copy-paste it into a browser on any device.
 2. **More importantly**: after you approve the login in that browser, Spotify redirects it to a fixed callback URL to finish the flow. By default that URL is `http://127.0.0.1:58739/callback`, which only resolves correctly when the browser doing the login is on the *exact same machine* as the container - never true when running this in Docker on a NAS/server, since you're completing login from your own laptop/phone. Without fixing this, the login will look like it's hanging or silently failing at the final step even after you approve it in Spotify.
@@ -122,11 +124,3 @@ This starts the container, publishes port 5080, and mounts `./data` (next to the
 If you'd rather sidestep all of this: do the first login somewhere with a real browser and no networking complications (your own machine, console mode or `--ui` locally with the default `127.0.0.1`), then copy the resulting `spotify_auth_data.json`/`playlist_config.json` into the container's `./data` folder before starting it.
 
 **Also set `TZ` to your actual timezone** (already in `docker-compose.yml`, defaulted to a placeholder) - without it, the container defaults to UTC regardless of where it's physically running, which silently breaks the Settings screen's scheduled rebuild times (e.g. "07:00" fires at 7am UTC, not 7am local). The Settings page shows the server's current time zone and clock right next to the schedule list specifically so a mismatch like this is obvious at a glance instead of a guessing game.
-
-### How the image gets built
-
-`.github/workflows/docker-publish.yml` builds `Dockerfile` (which fetches the matching self-contained binary from whichever release the workflow is building for, rather than compiling from source) and pushes it to `ghcr.io/enslaved2die/betterdailydrive` whenever a release is published, tagged both `:latest` and with that release's own tag. `docker-compose.yml` just pulls `:latest`; pin a specific tag there instead if you'd rather control upgrades deliberately - either way it only updates on `docker compose pull` (or `up -d --pull always`), not automatically on container restart.
-
-**One-time setup after adding this workflow**: it needs to actually run once (either publish a new release, or trigger it manually via the Actions tab → "Publish Docker image" → "Run workflow") before the image exists at all. The first time it pushes, the resulting GHCR package is likely **private by default** - go to the package's settings on GitHub and set visibility to Public, or `docker compose pull` will fail with a permission error on any machine that isn't authenticated to GHCR.
-
-I don't have Docker available to test any of this myself - worth verifying the workflow run succeeds and the image pulls cleanly before relying on it.

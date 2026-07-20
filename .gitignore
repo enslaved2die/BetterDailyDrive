@@ -1,8 +1,8 @@
 bin/
 obj/
-publish*
+/publish*
 /packages/
-release*
+/release-assets/
 riderModule.iml
 /_ReSharper.Caches/
 .idea/
