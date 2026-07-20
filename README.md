@@ -108,6 +108,16 @@ A few things that matter for this to actually work:
 
 `docker-compose.yml` at the repo root pulls a pre-built image from GitHub Container Registry - no local build, no source checkout, no .NET SDK needed. It always launches in `--ui` mode, since that's the only mode that makes sense with no interactive terminal attached.
 
+### Parameters
+
+| Parameter | Type | Required? | Default | Purpose |
+|---|---|---|---|---|
+| `CALLBACK_HOST` | environment variable | Required for login | `127.0.0.1` (wrong for Docker) | Host/IP your browser can reach this machine at. Spotify redirects here after login - see below. |
+| `TZ` | environment variable | Recommended | `UTC` | Timezone the Settings screen's scheduled rebuild times are evaluated in. |
+| `5080` | published port | Required | - | The web dashboard (`http://<host>:5080`). |
+| `58739` | published port | Required for login | - | The OAuth callback port. Only reached by the browser during login, not otherwise used. |
+| `./data:/data` | volume | Required to persist login/setup | - | Where `spotify_auth_data.json`/`playlist_config.json` live; without it, both are lost on every container restart. |
+
 ```bash
 docker compose up -d
 ```

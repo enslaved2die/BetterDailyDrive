@@ -1,8 +1,8 @@
 services:
   better-daily-drive:
-    # Pre-built by .github/workflows/docker-publish.yml on every release - no local build/clone
-    # needed. Pin a specific version tag (e.g. v.1.0.0) here instead of :latest for controlled
-    # upgrades; either way this only updates when you actually re-pull (`docker compose pull`).
+    # Pre-built by .github/workflows/release.yml on every release - no local build/clone needed.
+    # Pin a specific version tag (e.g. v.1.0.0) here instead of :latest for controlled upgrades;
+    # either way this only updates when you actually re-pull (`docker compose pull`).
     image: ghcr.io/enslaved2die/betterdailydrive:latest
     container_name: better-daily-drive
     restart: unless-stopped
