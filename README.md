@@ -121,6 +121,8 @@ This starts the container, publishes port 5080, and mounts `./data` (next to the
 
 If you'd rather sidestep all of this: do the first login somewhere with a real browser and no networking complications (your own machine, console mode or `--ui` locally with the default `127.0.0.1`), then copy the resulting `spotify_auth_data.json`/`playlist_config.json` into the container's `./data` folder before starting it.
 
+**Also set `TZ` to your actual timezone** (already in `docker-compose.yml`, defaulted to a placeholder) - without it, the container defaults to UTC regardless of where it's physically running, which silently breaks the Settings screen's scheduled rebuild times (e.g. "07:00" fires at 7am UTC, not 7am local). The Settings page shows the server's current time zone and clock right next to the schedule list specifically so a mismatch like this is obvious at a glance instead of a guessing game.
+
 ### How the image gets built
 
 `.github/workflows/docker-publish.yml` builds `Dockerfile` (which fetches the matching self-contained binary from whichever release the workflow is building for, rather than compiling from source) and pushes it to `ghcr.io/enslaved2die/betterdailydrive` whenever a release is published, tagged both `:latest` and with that release's own tag. `docker-compose.yml` just pulls `:latest`; pin a specific tag there instead if you'd rather control upgrades deliberately - either way it only updates on `docker compose pull` (or `up -d --pull always`), not automatically on container restart.

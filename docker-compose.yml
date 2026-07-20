@@ -15,6 +15,11 @@ services:
       # http://<same value>:58739/callback as a Redirect URI in your Spotify app's settings at
       # https://developer.spotify.com/dashboard - Spotify rejects anything not on that exact list.
       - CALLBACK_HOST=192.168.1.100
+      # Without this, the container defaults to UTC regardless of where it's actually running, which
+      # silently breaks the Settings screen's scheduled rebuild times (e.g. "07:00" fires at 7am UTC,
+      # not 7am local). Set to your actual IANA timezone name - see
+      # https://en.wikipedia.org/wiki/List_of_tz_database_time_zones (the "TZ identifier" column).
+      - TZ=Europe/Berlin
     ports:
       - "5080:5080"
       - "58739:58739"

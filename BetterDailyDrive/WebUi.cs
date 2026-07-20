@@ -507,8 +507,15 @@ public static class WebUi
         sb.Append("<h1>Settings</h1>");
 
         sb.Append("<h2>Automatic rebuild times</h2>");
-        sb.Append("<p class='muted'>The playlist rebuilds automatically at these times every day, in this server's local time zone. ")
+        sb.Append("<p class='muted'>The playlist rebuilds automatically at these times every day, in this server's local time zone below. ")
           .Append("Only happens while this app is actually running - if it's off at the scheduled time, that run is simply skipped.</p>");
+
+        // If this doesn't match where the server actually is (e.g. a Docker container defaulting to
+        // UTC), the scheduled times above will silently fire at the wrong local time - showing this
+        // makes that mismatch obvious immediately instead of a guessing game.
+        sb.Append("<p class='muted'>Server time zone: <strong>").Append(Encode(TimeZoneInfo.Local.Id))
+          .Append("</strong> - current server time: <strong>").Append(Encode(DateTime.Now.ToString("HH:mm:ss")))
+          .Append("</strong></p>");
 
         var times = config.ScheduledTimes.OrderBy(t => t, StringComparer.Ordinal).ToList();
         if (!times.Any())
