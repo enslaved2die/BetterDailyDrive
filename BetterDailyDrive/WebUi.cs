@@ -459,8 +459,8 @@ public static class WebUi
         else if (!snapshot.HasToken)
         {
             sb.Append("<h1>Log in to Spotify</h1>");
-            sb.Append("<p><a href='login'><button class='btn-primary'>Login with Spotify</button></a></p>");
-            sb.Append("<p class='muted'>This opens Spotify in your browser to grant permission.</p>");
+            sb.Append("<p><a href='login' target='_blank' rel='noopener noreferrer'><button class='btn-primary'>Login with Spotify</button></a></p>");
+            sb.Append("<p class='muted'>This opens Spotify in a new tab to grant permission.</p>");
             sb.Append("<div style='margin-top:24px; padding:16px; background:#181818; border-radius:8px; border:1px solid #282828;'>");
             sb.Append("<h3 style='margin-top:0'>Running in Home Assistant / Headless?</h3>");
             sb.Append("<p class='muted'>If Spotify redirects your browser to <code>127.0.0.1</code> and the page cannot be reached, simply copy the URL from your browser address bar (or just the <code>code</code>) and paste it below:</p>");
@@ -495,7 +495,7 @@ public static class WebUi
                   .Append(Encode(FormatRelativeDays(remaining))).Append("</span>");
                 if (isExpiringSoon)
                 {
-                    sb.Append(" <a href='login'><button type='button' class='btn-outline btn-small'>Login</button></a>");
+                    sb.Append(" <a href='login' target='_blank' rel='noopener noreferrer'><button type='button' class='btn-outline btn-small'>Login</button></a>");
                 }
                 sb.Append("</p>");
             }
