@@ -160,6 +160,21 @@ public static class WebUi
             return next();
         });
 
+        // Middleware to ensure all HTML responses have Content-Type: text/html; charset=utf-8
+        // Without this, Home Assistant Ingress iframe or Safari cannot determine the MIME type and downloads a .dms file!
+        app.Use(async (ctx, next) =>
+        {
+            ctx.Response.OnStarting(() =>
+            {
+                if (string.IsNullOrEmpty(ctx.Response.ContentType))
+                {
+                    ctx.Response.ContentType = "text/html; charset=utf-8";
+                }
+                return Task.CompletedTask;
+            });
+            await next();
+        });
+
         // Without this, an unhandled exception in any route (e.g. a transient Spotify API error
         // mid-rebuild) surfaced as a bare, undiagnosable 500 to the browser with nothing printed
         // anywhere - ClearProviders() above also silenced ASP.NET Core's own exception logging.
