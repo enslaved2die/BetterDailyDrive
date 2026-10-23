@@ -212,7 +212,7 @@ public class AuthManager
     /// callback arrives - the token exchange happens later, asynchronously, in the callback server's
     /// own AuthorizationCodeReceived handler, once Spotify redirects the browser back.
     /// </summary>
-    public async Task<Uri> PrepareWebLoginRedirectAsync()
+    public async Task<Uri> PrepareWebLoginRedirectAsync(Uri? customCallbackUri = null)
     {
         _authData = await LoadAuthDataAsync();
         if (string.IsNullOrEmpty(_authData.ClientId))
@@ -220,24 +220,33 @@ public class AuthManager
             throw new InvalidOperationException("Client ID is not set.");
         }
 
-        if (_webLoginServer == null)
+        var effectiveCallback = customCallbackUri ?? CallbackUri;
+
+        if (customCallbackUri == null && _webLoginServer == null)
         {
-            var server = new EmbedIOAuthServer(CallbackUri, CallbackPort);
-            await server.Start();
-            server.AuthorizationCodeReceived += async (_, response) => await CompleteWebLoginAsync(response.Code);
-            server.ErrorReceived += (_, error, state) =>
+            try
             {
-                Console.WriteLine($"Web login authorization failed: {error} (state: {state})");
-                return Task.CompletedTask;
-            };
-            _webLoginServer = server;
-            Console.WriteLine($"OAuth callback listener started on {CallbackUri}.");
+                var server = new EmbedIOAuthServer(CallbackUri, CallbackPort);
+                await server.Start();
+                server.AuthorizationCodeReceived += async (_, response) => await CompleteWebLoginAsync(response.Code, CallbackUri);
+                server.ErrorReceived += (_, error, state) =>
+                {
+                    Console.WriteLine($"Web login authorization failed: {error} (state: {state})");
+                    return Task.CompletedTask;
+                };
+                _webLoginServer = server;
+                Console.WriteLine($"OAuth callback listener started on {CallbackUri}.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Could not start background loopback listener on port {CallbackPort} ({ex.Message}) - manual code entry or web callback will be used.");
+            }
         }
 
         (string codeVerifier, string codeChallenge) = PKCEUtil.GenerateCodes();
         _webLoginCodeVerifier = codeVerifier;
 
-        var loginRequest = new LoginRequest(CallbackUri, _authData.ClientId, LoginRequest.ResponseType.Code)
+        var loginRequest = new LoginRequest(effectiveCallback, _authData.ClientId, LoginRequest.ResponseType.Code)
         {
             Scope = Scopes,
             CodeChallenge = codeChallenge,
@@ -246,24 +255,26 @@ public class AuthManager
         return loginRequest.ToUri();
     }
 
-    private async Task CompleteWebLoginAsync(string code)
+    public async Task<bool> CompleteWebLoginAsync(string code, Uri? usedCallbackUri = null)
     {
         var codeVerifier = _webLoginCodeVerifier;
         if (codeVerifier == null)
         {
             Console.WriteLine("Received an OAuth callback with no pending login attempt - ignoring.");
-            return;
+            return false;
         }
+
+        var callbackUri = usedCallbackUri ?? CallbackUri;
 
         try
         {
             var response = await new OAuthClient().RequestToken(
-                new PKCETokenRequest(_authData.ClientId, code, CallbackUri, codeVerifier));
+                new PKCETokenRequest(_authData.ClientId, code, callbackUri, codeVerifier));
 
             if (string.IsNullOrEmpty(response.AccessToken))
             {
                 Console.WriteLine("Web login token exchange failed: no access token returned.");
-                return;
+                return false;
             }
 
             _authData.AccessToken = response.AccessToken;
@@ -274,10 +285,12 @@ public class AuthManager
             _authData.OriginalAuthorizationAt = DateTime.Now;
             await SaveAuthDataAsync(_authData);
             Console.WriteLine("Web login completed successfully.");
+            return true;
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Web login token exchange failed: {ex.Message}");
+            return false;
         }
     }
 

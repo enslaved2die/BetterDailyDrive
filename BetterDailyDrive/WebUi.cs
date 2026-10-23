@@ -146,6 +146,20 @@ public static class WebUi
         builder.Logging.ClearProviders(); // keep noise out of the console log panel
         var app = builder.Build();
 
+        // Home Assistant Ingress support: ingress passes X-Ingress-Path header
+        app.Use((ctx, next) =>
+        {
+            if (ctx.Request.Headers.TryGetValue("X-Ingress-Path", out var ingressPath))
+            {
+                var pathStr = ingressPath.ToString().TrimEnd('/');
+                if (!string.IsNullOrEmpty(pathStr))
+                {
+                    ctx.Request.PathBase = pathStr;
+                }
+            }
+            return next();
+        });
+
         // Without this, an unhandled exception in any route (e.g. a transient Spotify API error
         // mid-rebuild) surfaced as a bare, undiagnosable 500 to the browser with nothing printed
         // anywhere - ClearProviders() above also silenced ASP.NET Core's own exception logging.
@@ -163,23 +177,27 @@ public static class WebUi
                 {
                     ctx.Response.StatusCode = 500;
                     ctx.Response.ContentType = "text/plain";
+                    var homeUrl = ctx.Request.PathBase.HasValue ? ctx.Request.PathBase.Value + "/" : "/";
                     await ctx.Response.WriteAsync(
                         "Something went wrong: " + ex.Message +
-                        "\n\nFull details were written to the terminal running this app. Go back to http://localhost:5080/ and try again.");
+                        $"\n\nFull details were written to the terminal running this app. Go back to {homeUrl} and try again.");
                 }
             }
         });
+
+        string GetRedirectUrl(HttpContext ctx, string relativePath)
+        {
+            var prefix = ctx.Request.PathBase.HasValue ? ctx.Request.PathBase.Value : "";
+            if (!prefix.EndsWith("/") && !relativePath.StartsWith("/"))
+                prefix += "/";
+            return prefix + relativePath;
+        }
 
         app.MapGet("/", async ctx =>
         {
             var snapshot = await authManager.GetAuthSnapshotAsync();
             var config = await PlaylistManager.LoadConfigurationAsync();
 
-            // Silently refresh-if-needed and fetch the current playlist contents, but never pop a
-            // browser from a passive page load - if that would be required, just skip the track list.
-            // Also never let a passive page load 500 the whole dashboard just because the stored token
-            // happened to get rejected by Spotify at this exact moment (e.g. revoked, clock skew) -
-            // that's still recoverable via Login, so degrade to "no track list" instead of crashing.
             List<PlaylistManager.TrackSummary>? currentTracks = null;
             try
             {
@@ -198,7 +216,8 @@ public static class WebUi
                 Console.WriteLine($"Could not load current playlist for dashboard: {ex.Message}");
             }
 
-            await ctx.Response.WriteAsync(Html("Better Daily Drive", RenderDashboard(snapshot, config, currentTracks)));
+            var basePath = ctx.Request.PathBase.HasValue ? ctx.Request.PathBase.Value : "";
+            await ctx.Response.WriteAsync(Html("Better Daily Drive", RenderDashboard(snapshot, config, currentTracks, basePath), basePath));
         });
 
         app.MapPost("/client-id", async ctx =>
@@ -209,35 +228,85 @@ public static class WebUi
             {
                 await authManager.SetClientIdAsync(clientId);
             }
-            ctx.Response.Redirect("/");
+            ctx.Response.Redirect(GetRedirectUrl(ctx, ""));
         });
 
-        // Redirects the browser making this request straight to Spotify - deliberately not using
-        // EnsureAuthenticatedAsync/StartAuthenticationFlowAsync here, since those are built for the
-        // CLI (open a browser on this same machine, block waiting for the callback) and specifically
-        // refuse to run at all when Console.IsInputRedirected is true, which is normal for any
-        // container/background service and has nothing to do with whether a browser-driven login can
-        // work. The user is already in a real browser clicking Login right now - just send it to
-        // Spotify directly and let the callback server (started here, kept running) complete the
-        // exchange asynchronously when Spotify redirects back.
         app.MapGet("/login", async ctx =>
         {
             try
             {
-                var redirectUri = await authManager.PrepareWebLoginRedirectAsync();
+                Uri? customCallback = null;
+                if (ctx.Request.IsHttps || ctx.Request.Headers["X-Forwarded-Proto"] == "https")
+                {
+                    var host = ctx.Request.Headers["X-Forwarded-Host"].FirstOrDefault() ?? ctx.Request.Host.Value;
+                    var pathBase = ctx.Request.PathBase.HasValue ? ctx.Request.PathBase.Value : "";
+                    customCallback = new Uri($"https://{host}{pathBase}/callback");
+                }
+
+                var redirectUri = await authManager.PrepareWebLoginRedirectAsync(customCallback);
                 ctx.Response.Redirect(redirectUri.ToString());
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Could not start login: {ex.Message}");
-                ctx.Response.Redirect("/");
+                ctx.Response.Redirect(GetRedirectUrl(ctx, ""));
             }
+        });
+
+        // Direct callback route (supports HTTPS direct redirect if configured in Spotify dashboard)
+        app.MapGet("/callback", async ctx =>
+        {
+            var code = ctx.Request.Query["code"].ToString();
+            var error = ctx.Request.Query["error"].ToString();
+            if (!string.IsNullOrEmpty(error))
+            {
+                Console.WriteLine($"Spotify auth returned error: {error}");
+                ctx.Response.Redirect(GetRedirectUrl(ctx, ""));
+                return;
+            }
+
+            if (!string.IsNullOrEmpty(code))
+            {
+                var host = ctx.Request.Headers["X-Forwarded-Host"].FirstOrDefault() ?? ctx.Request.Host.Value;
+                var pathBase = ctx.Request.PathBase.HasValue ? ctx.Request.PathBase.Value : "";
+                var scheme = (ctx.Request.IsHttps || ctx.Request.Headers["X-Forwarded-Proto"] == "https") ? "https" : "http";
+                var usedCallback = new Uri($"{scheme}://{host}{pathBase}/callback");
+
+                var success = await authManager.CompleteWebLoginAsync(code, usedCallback);
+                if (!success)
+                {
+                    await authManager.CompleteWebLoginAsync(code);
+                }
+            }
+
+            ctx.Response.Redirect(GetRedirectUrl(ctx, ""));
+        });
+
+        // Manual code submission (Hybrid Solution: user pastes redirected loopback URL or code)
+        app.MapPost("/complete-login", async ctx =>
+        {
+            var form = await ctx.Request.ReadFormAsync();
+            var rawInput = form["codeOrUrl"].ToString().Trim();
+            if (!string.IsNullOrEmpty(rawInput))
+            {
+                string code = rawInput;
+                if (rawInput.Contains("code="))
+                {
+                    var match = System.Text.RegularExpressions.Regex.Match(rawInput, @"code=([^&]+)");
+                    if (match.Success)
+                    {
+                        code = Uri.UnescapeDataString(match.Groups[1].Value);
+                    }
+                }
+                await authManager.CompleteWebLoginAsync(code);
+            }
+            ctx.Response.Redirect(GetRedirectUrl(ctx, ""));
         });
 
         app.MapGet("/setup", async ctx =>
         {
             var manager = await TryGetAuthenticatedManagerSilentlyAsync();
-            if (manager == null) { ctx.Response.Redirect("/"); return; }
+            if (manager == null) { ctx.Response.Redirect(GetRedirectUrl(ctx, "")); return; }
 
             var destinationId = await EnsureDestinationIdAsync(manager);
             var candidates = destinationId != null
@@ -246,39 +315,35 @@ public static class WebUi
             var shows = await manager.GetFollowedShowsAsync();
             var existingConfig = await PlaylistManager.LoadConfigurationAsync();
 
-            await ctx.Response.WriteAsync(Html("Setup", RenderSetupForm(candidates, shows, existingConfig)));
+            var basePath = ctx.Request.PathBase.HasValue ? ctx.Request.PathBase.Value : "";
+            await ctx.Response.WriteAsync(Html("Setup", RenderSetupForm(candidates, shows, existingConfig), basePath));
         });
 
         app.MapPost("/setup", async ctx =>
         {
             var manager = await TryGetAuthenticatedManagerSilentlyAsync();
-            if (manager == null) { ctx.Response.Redirect("/"); return; }
+            if (manager == null) { ctx.Response.Redirect(GetRedirectUrl(ctx, "")); return; }
 
             var form = await ctx.Request.ReadFormAsync();
             var config = new PlaylistManager.PlaylistConfiguration
             {
                 SourcePlaylistIds = SplitCsv(form["playlistIds"].ToString()),
-                // ShowIds is order-significant (interleave sequence) - comes from a hidden input
-                // built by click order in the browser, not checkbox DOM order.
                 ShowIds = SplitCsv(form["showOrder"].ToString())
             };
             await PlaylistManager.SaveConfigurationAsync(config);
-            ctx.Response.Redirect("/");
+            ctx.Response.Redirect(GetRedirectUrl(ctx, ""));
         });
 
         app.MapPost("/run", async ctx =>
         {
             var manager = await TryGetAuthenticatedManagerSilentlyAsync();
-            if (manager == null) { ctx.Response.Redirect("/"); return; }
+            if (manager == null) { ctx.Response.Redirect(GetRedirectUrl(ctx, "")); return; }
 
             var config = await PlaylistManager.LoadConfigurationAsync();
-            if (config == null) { ctx.Response.Redirect("/setup"); return; }
+            if (config == null) { ctx.Response.Redirect(GetRedirectUrl(ctx, "setup")); return; }
 
-            // Runs in the background rather than being awaited here: the whole point of the progress
-            // bar is to show live status while the rebuild is in flight, which requires this request
-            // to return immediately instead of blocking until the pipeline finishes.
             TryStartRebuild(manager, config);
-            ctx.Response.Redirect("/");
+            ctx.Response.Redirect(GetRedirectUrl(ctx, ""));
         });
 
         app.MapGet("/progress", async ctx =>
@@ -290,16 +355,17 @@ public static class WebUi
         app.MapGet("/settings", async ctx =>
         {
             var manager = await TryGetAuthenticatedManagerSilentlyAsync();
-            if (manager == null) { ctx.Response.Redirect("/"); return; }
+            if (manager == null) { ctx.Response.Redirect(GetRedirectUrl(ctx, "")); return; }
 
             var config = await PlaylistManager.LoadConfigurationAsync() ?? new PlaylistManager.PlaylistConfiguration();
-            await ctx.Response.WriteAsync(Html("Settings", RenderSettingsForm(config)));
+            var basePath = ctx.Request.PathBase.HasValue ? ctx.Request.PathBase.Value : "";
+            await ctx.Response.WriteAsync(Html("Settings", RenderSettingsForm(config), basePath));
         });
 
         app.MapPost("/settings/add", async ctx =>
         {
             var manager = await TryGetAuthenticatedManagerSilentlyAsync();
-            if (manager == null) { ctx.Response.Redirect("/"); return; }
+            if (manager == null) { ctx.Response.Redirect(GetRedirectUrl(ctx, "settings")); return; }
 
             var form = await ctx.Request.ReadFormAsync();
             var time = form["time"].ToString().Trim();
@@ -309,17 +375,17 @@ public static class WebUi
                 && !config.ScheduledTimes.Contains(time))
             {
                 config.ScheduledTimes.Add(time);
-                config.ScheduledTimes.Sort(StringComparer.Ordinal); // "HH:mm" sorts correctly as plain text
+                config.ScheduledTimes.Sort(StringComparer.Ordinal);
                 await PlaylistManager.SaveConfigurationAsync(config);
             }
 
-            ctx.Response.Redirect("/settings");
+            ctx.Response.Redirect(GetRedirectUrl(ctx, "settings"));
         });
 
         app.MapPost("/settings/remove", async ctx =>
         {
             var manager = await TryGetAuthenticatedManagerSilentlyAsync();
-            if (manager == null) { ctx.Response.Redirect("/"); return; }
+            if (manager == null) { ctx.Response.Redirect(GetRedirectUrl(ctx, "settings")); return; }
 
             var form = await ctx.Request.ReadFormAsync();
             var time = form["time"].ToString().Trim();
@@ -327,7 +393,7 @@ public static class WebUi
             config.ScheduledTimes.Remove(time);
             await PlaylistManager.SaveConfigurationAsync(config);
 
-            ctx.Response.Redirect("/settings");
+            ctx.Response.Redirect(GetRedirectUrl(ctx, "settings"));
         });
 
         _ = Task.Run(RunSchedulerLoopAsync);
@@ -361,7 +427,8 @@ public static class WebUi
     private static string RenderDashboard(
         (bool HasClientId, bool HasToken, DateTime? LoginExpiresAt) snapshot,
         PlaylistManager.PlaylistConfiguration? config,
-        List<PlaylistManager.TrackSummary>? currentTracks)
+        List<PlaylistManager.TrackSummary>? currentTracks,
+        string basePath = "")
     {
         var sb = new StringBuilder();
         sb.Append("<div class='content'>");
@@ -369,7 +436,7 @@ public static class WebUi
         if (!snapshot.HasClientId)
         {
             sb.Append("<h1>Connect your Spotify app</h1>");
-            sb.Append("<form method='post' action='/client-id' class='inline-form'>");
+            sb.Append("<form method='post' action='client-id' class='inline-form'>");
             sb.Append("<input name='clientId' placeholder='Spotify Client ID' required>");
             sb.Append("<button class='btn-primary' type='submit'>Save</button></form>");
             sb.Append("<p class='muted'>Get one from the <a href='https://developer.spotify.com/dashboard' target='_blank'>Spotify Developer Dashboard</a>.</p>");
@@ -377,8 +444,15 @@ public static class WebUi
         else if (!snapshot.HasToken)
         {
             sb.Append("<h1>Log in to Spotify</h1>");
-            sb.Append("<p><a href='/login'><button class='btn-primary'>Login with Spotify</button></a></p>");
-            sb.Append("<p class='muted'>This opens your browser to Spotify's login page.</p>");
+            sb.Append("<p><a href='login'><button class='btn-primary'>Login with Spotify</button></a></p>");
+            sb.Append("<p class='muted'>This opens Spotify in your browser to grant permission.</p>");
+            sb.Append("<div style='margin-top:24px; padding:16px; background:#181818; border-radius:8px; border:1px solid #282828;'>");
+            sb.Append("<h3 style='margin-top:0'>Running in Home Assistant / Headless?</h3>");
+            sb.Append("<p class='muted'>If Spotify redirects your browser to <code>127.0.0.1</code> and the page cannot be reached, simply copy the URL from your browser address bar (or just the <code>code</code>) and paste it below:</p>");
+            sb.Append("<form method='post' action='complete-login' class='inline-form' style='margin-top:12px;'>");
+            sb.Append("<input name='codeOrUrl' placeholder='Paste redirected URL or code here...' style='min-width:320px;' required>");
+            sb.Append("<button class='btn-primary' type='submit'>Finish Login</button></form>");
+            sb.Append("</div>");
         }
         else
         {
@@ -406,7 +480,7 @@ public static class WebUi
                   .Append(Encode(FormatRelativeDays(remaining))).Append("</span>");
                 if (isExpiringSoon)
                 {
-                    sb.Append(" <a href='/login'><button type='button' class='btn-outline btn-small'>Login</button></a>");
+                    sb.Append(" <a href='login'><button type='button' class='btn-outline btn-small'>Login</button></a>");
                 }
                 sb.Append("</p>");
             }
@@ -417,9 +491,9 @@ public static class WebUi
 
             sb.Append("</div>");
             sb.Append("<div class='actions'>");
-            sb.Append("<a href='/setup'><button class='btn-outline'>Edit Setup</button></a>");
-            sb.Append("<a href='/settings'><button class='btn-outline'>Settings</button></a>");
-            sb.Append("<form method='post' action='/run' id='runForm'><button class='btn-primary' id='runButton'>Rebuild Now</button></form>");
+            sb.Append("<a href='setup'><button class='btn-outline'>Edit Setup</button></a>");
+            sb.Append("<a href='settings'><button class='btn-outline'>Settings</button></a>");
+            sb.Append("<form method='post' action='run' id='runForm'><button class='btn-primary' id='runButton'>Rebuild Now</button></form>");
             sb.Append("</div></div>");
 
             var progress = ProgressState.Snapshot();
@@ -473,7 +547,7 @@ public static class WebUi
             }
 
             function poll() {
-                fetch('/progress').then(r => r.json()).then(data => {
+                fetch('progress').then(r => r.json()).then(data => {
                     if (!section || !fill || !status) return;
                     section.style.display = data.isRunning || data.percent > 0 ? 'block' : 'none';
                     fill.style.width = data.percent + '%';
@@ -492,7 +566,7 @@ public static class WebUi
                 runForm.addEventListener('submit', function(e) {
                     e.preventDefault();
                     setButtonDisabled(true);
-                    fetch('/run', { method: 'POST' }).then(() => { polling = true; poll(); });
+                    fetch('run', { method: 'POST' }).then(() => { polling = true; poll(); });
                 });
             }
 
@@ -529,7 +603,7 @@ public static class WebUi
             {
                 sb.Append("<div class='schedule-row'>");
                 sb.Append("<span class='schedule-time'>").Append(Encode(time)).Append("</span>");
-                sb.Append("<form method='post' action='/settings/remove'>");
+                sb.Append("<form method='post' action='settings/remove'>");
                 sb.Append("<input type='hidden' name='time' value='").Append(Encode(time)).Append("'>");
                 sb.Append("<button type='submit' class='btn-outline'>Remove</button>");
                 sb.Append("</form>");
@@ -538,12 +612,12 @@ public static class WebUi
             sb.Append("</div>");
         }
 
-        sb.Append("<form method='post' action='/settings/add' class='inline-form'>");
+        sb.Append("<form method='post' action='settings/add' class='inline-form'>");
         sb.Append("<input type='time' name='time' required>");
         sb.Append("<button class='btn-primary' type='submit'>Add time</button>");
         sb.Append("</form>");
 
-        sb.Append("<p style='margin-top:24px'><a href='/'><button type='button' class='btn-outline'>Back</button></a></p>");
+        sb.Append("<p style='margin-top:24px'><a href='./'><button type='button' class='btn-outline'>Back</button></a></p>");
         sb.Append("</div>");
         return sb.ToString();
     }
@@ -557,7 +631,7 @@ public static class WebUi
         var sb = new StringBuilder();
         sb.Append("<div class='content'>");
         sb.Append("<h1>Setup</h1>");
-        sb.Append("<form method='post' action='/setup' id='setupForm'>");
+        sb.Append("<form method='post' action='setup' id='setupForm'>");
 
         sb.Append("<h2>Source playlists (music)</h2>");
         sb.Append("<p class='muted'>Click a cover to toggle it as a source.</p>");
@@ -606,7 +680,7 @@ public static class WebUi
 
         sb.Append("<div class='actions' style='margin-top:24px'>");
         sb.Append("<button class='btn-primary' type='submit'>Save Setup</button> ");
-        sb.Append("<a href='/'><button type='button' class='btn-outline'>Cancel</button></a>");
+        sb.Append("<a href='./'><button type='button' class='btn-outline'>Cancel</button></a>");
         sb.Append("</div></form></div>");
 
         sb.Append("<script>").Append(SetupScript(selectedPlaylistIds, selectedShowOrder)).Append("</script>");
@@ -754,9 +828,13 @@ public static class WebUi
         .schedule-time { font-size: 1.1em; font-weight: 600; font-variant-numeric: tabular-nums; }
         """;
 
-    private static string Html(string title, string body) =>
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-        + "<title>" + Encode(title) + "</title><style>" + Style + "</style></head><body>" + body + "</body></html>";
+    private static string Html(string title, string body, string basePath = "")
+    {
+        var baseHref = string.IsNullOrEmpty(basePath) ? "/" : (basePath.EndsWith("/") ? basePath : basePath + "/");
+        return "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            + $"<base href=\"{Encode(baseHref)}\">"
+            + "<title>" + Encode(title) + "</title><style>" + Style + "</style></head><body>" + body + "</body></html>";
+    }
 
     // Adapts Console.WriteLine so every line also reaches the in-memory log the dashboard renders.
     private sealed class TeeTextWriter : System.IO.TextWriter
