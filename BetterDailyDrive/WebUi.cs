@@ -250,15 +250,11 @@ public static class WebUi
         {
             try
             {
-                Uri? customCallback = null;
-                if (ctx.Request.IsHttps || ctx.Request.Headers["X-Forwarded-Proto"] == "https")
-                {
-                    var host = ctx.Request.Headers["X-Forwarded-Host"].FirstOrDefault() ?? ctx.Request.Host.Value;
-                    var pathBase = ctx.Request.PathBase.HasValue ? ctx.Request.PathBase.Value : "";
-                    customCallback = new Uri($"https://{host}{pathBase}/callback");
-                }
-
-                var redirectUri = await authManager.PrepareWebLoginRedirectAsync(customCallback);
+                // Always use standard loopback redirect URI (http://127.0.0.1:58739/callback).
+                // HA Ingress tokens (e.g. /api/hassio_ingress/<token>/callback) change dynamically across
+                // restarts/sessions and cannot be pre-registered statically in the Spotify Developer Dashboard.
+                // The hybrid fallback box on the dashboard allows users to paste the loopback redirect code.
+                var redirectUri = await authManager.PrepareWebLoginRedirectAsync(null);
                 ctx.Response.Redirect(redirectUri.ToString());
             }
             catch (Exception ex)
